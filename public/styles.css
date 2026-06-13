@@ -273,19 +273,19 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* ----------------------------- bottom nav ------------------------------ */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; height: var(--nav-h);
-  display: flex; z-index: 40; border-radius: 0;
+  display: flex; align-items: stretch; z-index: 40; border-radius: 0;
   padding-bottom: env(safe-area-inset-bottom, 0);
 }
 .navbtn {
   flex: 1; background: transparent; border: none; color: var(--text-dim);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-  transition: color .15s;
+  height: 100%; padding: 0 2px; transition: color .15s;
 }
-.navbtn .ni { font-size: 22px; line-height: 1; }
+.navbtn .ni { font-size: 22px; line-height: 1; height: 24px; display: flex; align-items: center; justify-content: center; }
 .navbtn .nl { font-size: 12.5px; font-weight: 600; }
 .navbtn.no-icon { justify-content: center; }
 .navbtn.no-icon .nl { font-size: 15px; }
-.nav-svg { width: 22px; height: 22px; display: block; }
+.nav-svg { width: 22px; height: 22px; object-fit: contain; display: block; }
 .navbtn.active { color: var(--accent-2); }
 .navbtn.active .ni { filter: drop-shadow(0 0 8px rgba(88,192,255,.6)); }
 
