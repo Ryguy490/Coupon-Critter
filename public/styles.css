@@ -147,10 +147,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* --------------------------- precip / intensity ------------------------ */
 .precip-readout { font-size: 15px; line-height: 1.7; }
 .precip-readout b { font-size: 22px; font-weight: 600; }
-.intensity-guide { display: flex; align-items: flex-end; gap: 5px; height: 90px; }
-.intensity-guide .ig-bar { flex: 1; border-radius: 5px 5px 0 0; background: linear-gradient(180deg, var(--accent-2), var(--accent)); position: relative; min-height: 3px; }
+.intensity-guide { display: flex; align-items: flex-end; gap: 5px; height: 90px; padding-bottom: 20px; }
+.intensity-guide .ig-bar { flex: 1; border-radius: 5px 5px 0 0; position: relative; min-height: 4px; transition: height .3s; }
+.intensity-guide .ig-bar.none  { background: rgba(255,255,255,.14); }
+.intensity-guide .ig-bar.light { background: linear-gradient(180deg, #8fd3ff, #58c0ff); }
+.intensity-guide .ig-bar.mod   { background: linear-gradient(180deg, #58c0ff, #2f7bff); }
+.intensity-guide .ig-bar.heavy { background: linear-gradient(180deg, #7b5cff, #c026d3); }
 .intensity-guide .ig-bar span { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--text-dim); }
-.intensity-guide { padding-bottom: 20px; }
+.intensity-legend { display: flex; gap: 16px; margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+.intensity-legend span { display: flex; align-items: center; gap: 6px; }
+.intensity-legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.intensity-legend .sw.light { background: #58c0ff; }
+.intensity-legend .sw.mod { background: #2f7bff; }
+.intensity-legend .sw.heavy { background: #c026d3; }
+.intensity-status { font-size: 12.5px; margin-top: 10px; }
+.intensity-status.muted { color: var(--text-dim); }
 
 /* ----------------------------- hourly ---------------------------------- */
 .hourly-table { display: flex; flex-direction: column; gap: 8px; }
@@ -261,6 +272,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   font-size: 10.5px; transition: color .15s;
 }
 .navbtn .ni { font-size: 20px; }
+.navbtn.no-icon .nl { font-size: 14px; font-weight: 600; }
 .navbtn.active { color: var(--accent-2); }
 .navbtn.active .ni { filter: drop-shadow(0 0 8px rgba(88,192,255,.6)); }
 

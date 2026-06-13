@@ -90,7 +90,7 @@ async function loadEverything(refresh = false) {
   $('#locLabel').textContent = state.label;
   $('#menuLoc').textContent = state.label;
   persistLocation();
-  await Promise.all([loadWeather(refresh), refreshAlerts(refresh)]);
+  await Promise.all([loadWeather(refresh), refreshAlerts(refresh), loadDrought()]);
   // re-render whatever tab is active so it shows fresh data
   renderActiveView();
 }
@@ -105,6 +105,11 @@ async function loadWeather(refresh) {
   } catch (e) {
     console.error('weather load failed', e);
   }
+}
+
+async function loadDrought() {
+  try { state.drought = await getJSON(`/api/drought?lat=${state.lat}&lon=${state.lon}`); }
+  catch (_) { state.drought = state.drought || {}; }
 }
 
 /* ------------------------------- rendering ----------------------------- */
@@ -141,7 +146,7 @@ function renderHome() {
   renderIntensity();
   renderHourly();
   renderDaily();
-  loadPatternSummary();
+  renderPattern();
 }
 
 function renderPrecipWindow() {
@@ -153,16 +158,36 @@ function renderPrecipWindow() {
   $('#precipReadout').innerHTML = html;
 }
 
+// Weather Channel-style precipitation intensity timeline. Always shows the
+// next 12 hours; when no precipitation is expected the bars are greyed out but
+// the timeline (with hour labels) still shows.
 function renderIntensity() {
   const w = state.weather; if (!w) return;
   const next = (w.hourly || []).slice(0, 12);
-  const max = Math.max(0.05, ...next.map((h) => h.precip || 0));
+  const anyPrecip = next.some((h) => (h.precip || 0) > 0);
+  // scale to a sensible ceiling so light rain still reads as "light"
+  const max = Math.max(0.3, ...next.map((h) => h.precip || 0));
+  const tier = (p) => (p <= 0 ? 'none' : p < 0.1 ? 'light' : p < 0.3 ? 'mod' : 'heavy');
+  const step = Math.ceil(next.length / 6);
+
   $('#intensityGuide').innerHTML = next
-    .map((h) => {
-      const pct = Math.round(((h.precip || 0) / max) * 100);
-      return `<div class="ig-bar" style="height:${Math.max(3, pct)}%" title="${h.precip || 0} in"><span>${fmtHour(h.time)}</span></div>`;
+    .map((h, i) => {
+      const p = h.precip || 0;
+      const cls = anyPrecip ? tier(p) : 'none';
+      // greyed timeline: uniform low bars when nothing is coming
+      const pct = anyPrecip ? Math.max(6, Math.round((p / max) * 100)) : 30;
+      const label = i % step === 0 ? `<span>${fmtHour(h.time)}</span>` : '';
+      return `<div class="ig-bar ${cls}" style="height:${pct}%" title="${fmtHour(h.time)} · ${p} in">${label}</div>`;
     })
     .join('');
+
+  const status = $('#intensityStatus');
+  if (status) {
+    status.textContent = anyPrecip
+      ? 'Precipitation intensity over the next 12 hours.'
+      : 'No precipitation expected in the next 12 hours.';
+    status.classList.toggle('muted', !anyPrecip);
+  }
 }
 
 function renderHourly() {
@@ -224,16 +249,75 @@ function selectDay(i) {
   loadDailySummary(d, i);
 }
 
-/* ----- AI summaries (only where specified) ----- */
-async function loadPatternSummary() {
-  if (state._patternFor === key()) return; // avoid refetch per render
-  state._patternFor = key();
-  const el = $('#patternText');
-  try {
-    const r = await postJSON('/api/ai/pattern', state.weather);
-    el.textContent = r.text || fallbackPattern();
-  } catch (_) { el.textContent = fallbackPattern(); }
+/* ----- Weather Pattern card -----
+   Shows the dominant active hazard (Flood, Tornado, Drought, etc.) with an
+   overview. Falls back to the general weather pattern when nothing notable is
+   happening. */
+async function renderPattern() {
+  const titleEl = $('#patternTitle');
+  const bodyEl = $('#patternText');
+  const hz = detectHazard();
+  titleEl.textContent = hz.title;
+
+  if (hz.kind === 'alert') {
+    bodyEl.textContent = hz.body;
+    return;
+  }
+  if (hz.kind === 'drought') {
+    bodyEl.textContent = state._droughtText || droughtFallback(state.drought);
+    if (state._droughtFor !== key()) {
+      state._droughtFor = key();
+      try {
+        const r = await postJSON('/api/ai/drought', { drought: state.drought, location: state.weather?.location, precip: state.drought?.precip });
+        if (r.text) { state._droughtText = r.text; if (detectHazard().kind === 'drought') bodyEl.textContent = r.text; }
+      } catch (_) {}
+    }
+    return;
+  }
+  // default: general weather pattern
+  bodyEl.textContent = state._patternAI || fallbackPattern();
+  if (state._patternFor !== key()) {
+    state._patternFor = key();
+    try {
+      const r = await postJSON('/api/ai/pattern', state.weather);
+      if (r.text) { state._patternAI = r.text; if (detectHazard().kind === 'pattern') bodyEl.textContent = r.text; }
+    } catch (_) {}
+  }
 }
+
+// Pick the most significant active hazard from alerts + drought status.
+function detectHazard() {
+  const alerts = state.alerts || [];
+  const pick = (re) => alerts.find((a) => re.test(a.event || ''));
+  const order = [
+    [/tornado/i, 'Tornado'],
+    [/hurricane|tropical storm|tropical depression/i, 'Tropical System'],
+    [/flash flood/i, 'Flash Flood'],
+    [/flood/i, 'Flood'],
+    [/severe thunderstorm/i, 'Severe Thunderstorms'],
+    [/blizzard|winter storm|ice storm|winter weather|snow|freez/i, 'Winter Weather'],
+    [/excessive heat|heat/i, 'Extreme Heat'],
+    [/(high wind|wind advisory|gale|hurricane force wind)/i, 'High Wind'],
+    [/fire|red flag/i, 'Fire Weather'],
+    [/freeze|frost/i, 'Cold'],
+  ];
+  for (const [re, label] of order) {
+    const a = pick(re);
+    if (a) return { kind: 'alert', title: label, body: cleanDesc(a) };
+  }
+  const d = state.drought;
+  if (d && d.dm >= 1) return { kind: 'drought', title: 'Drought', body: null };
+  return { kind: 'pattern', title: 'Weather Pattern', body: null };
+}
+
+// Trim an alert into a short overview (first few sentences).
+function cleanDesc(a) {
+  const raw = (a.description || a.headline || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return a.event;
+  const sentences = raw.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
+  return sentences.length > 360 ? sentences.slice(0, 357) + '…' : sentences;
+}
+
 function fallbackPattern() {
   const n = state.weather?.narratives;
   return n?.pirateSummary || (n?.nwsForecast?.[0]) || 'Current conditions are shown above.';
@@ -684,6 +768,7 @@ async function doSearch(q) {
 function setLocation(lat, lon, label) {
   state.lat = lat; state.lon = lon; state.label = label;
   state.drought = null; state.selectedDay = 0;
+  state._patternFor = null; state._patternAI = null; state._droughtFor = null; state._droughtText = null;
   // reset maps tied to the old location so they recenter
   for (const k of ['snow', 'drought']) { if (state.maps[k]) { state.maps[k].remove(); delete state.maps[k]; } }
   if (state.maps.radar) state.maps.radar.setView([lat, lon], state.maps.radar.getZoom());
@@ -693,7 +778,8 @@ function setLocation(lat, lon, label) {
 function doRefresh() {
   const btn = $('#refreshBtn'); btn.style.transform = 'rotate(360deg)'; btn.style.transition = 'transform .6s';
   setTimeout(() => { btn.style.transform = ''; btn.style.transition = ''; }, 600);
-  state.drought = null; state.storms = null; state._patternFor = null;
+  state.drought = null; state.storms = null;
+  state._patternFor = null; state._patternAI = null; state._droughtFor = null; state._droughtText = null;
   loadEverything(true);
 }
 

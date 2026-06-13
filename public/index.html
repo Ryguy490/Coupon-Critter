@@ -66,7 +66,7 @@
         </div>
 
         <div class="card glass" id="patternCard">
-          <h3 class="card-title">Weather Pattern <span class="ai-badge">AI</span></h3>
+          <h3 class="card-title" id="patternTitle">Weather Pattern</h3>
           <p id="patternText" class="pattern-text">Analyzing the current weather pattern…</p>
         </div>
 
@@ -88,6 +88,12 @@
         <div class="card glass">
           <h3 class="card-title">Intensity Guide</h3>
           <div id="intensityGuide" class="intensity-guide"></div>
+          <div class="intensity-legend">
+            <span><i class="sw light"></i>Light</span>
+            <span><i class="sw mod"></i>Moderate</span>
+            <span><i class="sw heavy"></i>Heavy</span>
+          </div>
+          <div id="intensityStatus" class="intensity-status muted"></div>
         </div>
       </div>
 
@@ -202,8 +208,8 @@
 
   <!-- ============================== BOTTOM NAV ============================== -->
   <nav class="bottom-nav glass">
-    <button class="navbtn active" data-nav="home"><span class="ni">&#127968;</span><span class="nl">Home</span></button>
-    <button class="navbtn" data-nav="radar"><span class="ni">&#128225;</span><span class="nl">Radar</span></button>
+    <button class="navbtn active no-icon" data-nav="home"><span class="nl">Home</span></button>
+    <button class="navbtn no-icon" data-nav="radar"><span class="nl">Radar</span></button>
     <button class="navbtn" data-nav="snow"><span class="ni">&#10052;</span><span class="nl">Snow</span></button>
     <button class="navbtn" data-nav="hurricanes"><span class="ni">&#127786;</span><span class="nl">Hurricanes</span></button>
     <button class="navbtn" data-nav="severe"><span class="ni">&#9889;</span><span class="nl">Severe</span></button>
