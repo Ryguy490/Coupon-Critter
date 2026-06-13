@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="cl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfe0f5"/>
+    </linearGradient>
+  </defs>
+  <!-- sun peeking behind the cloud -->
+  <circle cx="44" cy="20" r="9" fill="#ffd24a"/>
+  <g stroke="#ffd24a" stroke-width="2.4" stroke-linecap="round">
+    <line x1="44" y1="4" x2="44" y2="9"/>
+    <line x1="58" y1="9" x2="55" y2="12"/>
+    <line x1="61" y1="22" x2="56" y2="22"/>
+  </g>
+  <!-- cloud -->
+  <path d="M18 40a11 11 0 0 1 1.2-21.9 14 14 0 0 1 26.4 4.2A9.5 9.5 0 0 1 44 40Z" fill="url(#cl)" stroke="#9db8d8" stroke-width="1.2"/>
+  <!-- rain -->
+  <g stroke="#5aa9ff" stroke-width="3" stroke-linecap="round">
+    <line x1="22" y1="46" x2="19" y2="54"/>
+    <line x1="33" y1="46" x2="30" y2="54"/>
+  </g>
+  <!-- lightning bolt -->
+  <path d="M44 44l-7 9h5l-3 9 9-12h-5l3-6z" fill="#ffd24a" stroke="#e8b800" stroke-width="0.8"/>
+</svg>

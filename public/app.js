@@ -1,0 +1,734 @@
+/* Weather Watcher — front-end application logic. */
+'use strict';
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+const state = {
+  lat: null,
+  lon: null,
+  label: 'Loading…',
+  weather: null,
+  alerts: [],
+  storms: null,
+  drought: null,
+  activeNav: 'home',
+  knownStormAlertIds: new Set(),
+  maps: {},
+  radar: { frames: [], idx: 0, layer: null, timer: null, playing: false },
+};
+
+const DEFAULT_LOC = { lat: 35.7796, lon: -78.6382, label: 'Raleigh, North Carolina' }; // WRAL country, matches the notes
+
+/* ------------------------------- helpers ------------------------------- */
+
+function iconUrl(code, isDay = 1) {
+  const suffix = isDay ? 'd' : 'n';
+  return `https://openweathermap.org/img/wn/${(code || '03')}${suffix}@2x.png`;
+}
+function fmtHour(iso) {
+  const d = new Date(iso);
+  let h = d.getHours();
+  const ap = h >= 12 ? 'pm' : 'am';
+  h = h % 12 || 12;
+  return `${h}${ap}`;
+}
+function fmtDow(iso) {
+  return new Date(iso + (iso.length === 10 ? 'T12:00' : '')).toLocaleDateString(undefined, { weekday: 'short' });
+}
+function fmtDate(iso) {
+  return new Date(iso + (iso.length === 10 ? 'T12:00' : '')).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+}
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${url} ${r.status}`);
+  return r.json();
+}
+async function postJSON(url, body) {
+  return getJSON(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+/* ------------------------------- bootstrap ----------------------------- */
+
+window.addEventListener('DOMContentLoaded', init);
+
+async function init() {
+  wireUI();
+  await resolveInitialLocation();
+  await loadEverything();
+  // poll alerts every 60s (drives the emergency siren)
+  setInterval(() => refreshAlerts(false), 60000);
+}
+
+async function resolveInitialLocation() {
+  const saved = localStorage.getItem('ww_loc');
+  if (saved) {
+    try { const o = JSON.parse(saved); Object.assign(state, o); return; } catch (_) {}
+  }
+  // try browser geolocation, fall back to default
+  const got = await new Promise((res) => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => res({ lat: p.coords.latitude, lon: p.coords.longitude }),
+      () => res(null),
+      { timeout: 6000 }
+    );
+  });
+  if (got) {
+    state.lat = got.lat; state.lon = got.lon;
+    try { const r = await getJSON(`/api/reverse?lat=${got.lat}&lon=${got.lon}`); state.label = r.label; } catch (_) { state.label = 'Your location'; }
+  } else {
+    Object.assign(state, DEFAULT_LOC);
+  }
+}
+
+function persistLocation() {
+  localStorage.setItem('ww_loc', JSON.stringify({ lat: state.lat, lon: state.lon, label: state.label }));
+}
+
+async function loadEverything(refresh = false) {
+  $('#locLabel').textContent = state.label;
+  $('#menuLoc').textContent = state.label;
+  persistLocation();
+  await Promise.all([loadWeather(refresh), refreshAlerts(refresh)]);
+  // re-render whatever tab is active so it shows fresh data
+  renderActiveView();
+}
+
+/* ------------------------------- weather ------------------------------- */
+
+async function loadWeather(refresh) {
+  try {
+    const w = await getJSON(`/api/weather?lat=${state.lat}&lon=${state.lon}${refresh ? '&refresh=1' : ''}`);
+    state.weather = w;
+    if (w.location) { state.label = w.location; $('#locLabel').textContent = w.location; $('#menuLoc').textContent = w.location; }
+  } catch (e) {
+    console.error('weather load failed', e);
+  }
+}
+
+/* ------------------------------- rendering ----------------------------- */
+
+function renderActiveView() {
+  switch (state.activeNav) {
+    case 'home': renderHome(); break;
+    case 'radar': renderRadar(); break;
+    case 'snow': renderSnow(); break;
+    case 'hurricanes': renderHurricanes(); break;
+    case 'severe': renderSevere(); break;
+    case 'drought': renderDrought(); break;
+  }
+}
+
+/* ----- HOME ----- */
+function renderHome() {
+  const w = state.weather;
+  if (!w) return;
+  const c = w.current;
+  $('#curIcon').src = iconUrl(c.icon, c.isDay);
+  $('#curTemp').textContent = c.temp ?? '--';
+  $('#curCond').textContent = c.condition || '—';
+  $('#curHumidity').textContent = `Humidity ${c.humidity ?? '--'}%`;
+  const upcoming = [];
+  if (c.windSpeed != null) upcoming.push(`Wind ${c.windSpeed} mph ${c.windDir}`);
+  if (c.windGust) upcoming.push(`gusts ${c.windGust} mph`);
+  const nextRain = (w.hourly || []).find((h) => (h.precipProb ?? 0) >= 40);
+  if (nextRain) upcoming.push(`${nextRain.precipProb}% precip ${fmtHour(nextRain.time)}`);
+  else upcoming.push('No precipitation expected soon');
+  $('#curUpcoming').textContent = upcoming.join(' · ');
+
+  renderPrecipWindow();
+  renderIntensity();
+  renderHourly();
+  renderDaily();
+  loadPatternSummary();
+}
+
+function renderPrecipWindow() {
+  const w = state.weather; if (!w) return;
+  const sel = $('#precipWindow').value;
+  const pw = (w.precipWindows || {})[sel] || { precip: 0, snow: 0 };
+  let html = `<b>${pw.precip ?? 0} in</b> of precipitation over the last ${sel} hour${sel === '1' ? '' : 's'}`;
+  if (pw.snow) html += `<br>Includes <b>${pw.snow} in</b> of snow`;
+  $('#precipReadout').innerHTML = html;
+}
+
+function renderIntensity() {
+  const w = state.weather; if (!w) return;
+  const next = (w.hourly || []).slice(0, 12);
+  const max = Math.max(0.05, ...next.map((h) => h.precip || 0));
+  $('#intensityGuide').innerHTML = next
+    .map((h) => {
+      const pct = Math.round(((h.precip || 0) / max) * 100);
+      return `<div class="ig-bar" style="height:${Math.max(3, pct)}%" title="${h.precip || 0} in"><span>${fmtHour(h.time)}</span></div>`;
+    })
+    .join('');
+}
+
+function renderHourly() {
+  const w = state.weather; if (!w) return;
+  let lastDay = '';
+  const rows = [];
+  for (const h of w.hourly || []) {
+    const day = new Date(h.time).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+    if (day !== lastDay) { rows.push(`<div class="hour-day">${day}</div>`); lastDay = day; }
+    rows.push(`
+      <div class="hour-row">
+        <span class="h-time">${fmtHour(h.time)}</span>
+        <img src="${iconUrl(h.icon, isDayHour(h.time, w))}" alt="" />
+        <span class="h-temp">${h.temp ?? '--'}°</span>
+        <span class="h-wind">${h.wind != null ? h.wind + ' ' + h.windDir : '—'}</span>
+        <span class="h-pp">${h.precipProb ?? 0}%</span>
+        <span class="h-amt">${(h.snowfall ? h.snowfall + '" sn' : (h.precip ?? 0) + ' in')}</span>
+      </div>`);
+  }
+  $('#hourlyTable').innerHTML = rows.join('') || '<div class="loading">No hourly data.</div>';
+}
+function isDayHour(iso, w) {
+  const h = new Date(iso).getHours();
+  return h >= 6 && h < 20 ? 1 : 0;
+}
+
+function renderDaily() {
+  const w = state.weather; if (!w || !w.daily?.length) return;
+  const today = w.daily[0];
+  $('#dailyCurrent').innerHTML = `
+    <img src="${iconUrl(today.icon)}" alt="" />
+    <div>
+      <div class="dc-temps"><b>${today.high}°</b> / ${today.low}°F</div>
+      <div class="dc-cond">${today.condition}</div>
+    </div>`;
+  $('#dailyStrip').innerHTML = w.daily
+    .map((d, i) => `
+      <button class="day-chip ${i === (state.selectedDay ?? 0) ? 'active' : ''}" data-day="${i}">
+        <div class="dch-dow">${i === 0 ? 'Today' : fmtDow(d.date)}</div>
+        <img src="${iconUrl(d.icon)}" alt="" />
+        <div class="dch-hi">${d.high}°</div>
+        <div class="dch-lo">${d.low}°</div>
+      </button>`)
+    .join('');
+  $$('#dailyStrip .day-chip').forEach((b) => b.addEventListener('click', () => selectDay(+b.dataset.day)));
+  selectDay(state.selectedDay ?? 0);
+}
+
+function selectDay(i) {
+  state.selectedDay = i;
+  const w = state.weather; const d = w.daily[i];
+  $$('#dailyStrip .day-chip').forEach((b) => b.classList.toggle('active', +b.dataset.day === i));
+  $('#dailyDetailTitle').textContent = `${i === 0 ? 'Today' : fmtDate(d.date)}`;
+  $('#dailyDetailStats').innerHTML = `
+    <span><b>${d.high}°</b> high</span><span><b>${d.low}°</b> low</span>
+    <span>Precip <b>${d.precipProb ?? 0}%</b></span><span>Total <b>${d.precipSum ?? 0} in</b></span>
+    ${d.snowSum ? `<span>Snow <b>${d.snowSum} in</b></span>` : ''}
+    <span>UV <b>${d.uvMax ?? '—'}</b></span><span>Wind <b>${d.windMax ?? '—'} mph</b> ${d.windDir || ''}</span>`;
+  loadDailySummary(d, i);
+}
+
+/* ----- AI summaries (only where specified) ----- */
+async function loadPatternSummary() {
+  if (state._patternFor === key()) return; // avoid refetch per render
+  state._patternFor = key();
+  const el = $('#patternText');
+  try {
+    const r = await postJSON('/api/ai/pattern', state.weather);
+    el.textContent = r.text || fallbackPattern();
+  } catch (_) { el.textContent = fallbackPattern(); }
+}
+function fallbackPattern() {
+  const n = state.weather?.narratives;
+  return n?.pirateSummary || (n?.nwsForecast?.[0]) || 'Current conditions are shown above.';
+}
+
+async function loadDailySummary(d, i) {
+  const el = $('#dailyDetailSummary');
+  el.innerHTML = 'Summarizing the day… <span class="ai-badge">AI</span>';
+  try {
+    const r = await postJSON('/api/ai/daily', {
+      day: d,
+      location: state.weather?.location,
+      nwsPeriods: state.weather?.narratives?.nwsForecast,
+    });
+    el.innerHTML = (r.text || dailyFallback(d)) + ' <span class="ai-badge">AI</span>';
+  } catch (_) { el.innerHTML = dailyFallback(d) + ' <span class="ai-badge">AI</span>'; }
+}
+function dailyFallback(d) {
+  return `${d.condition} with a high of ${d.high}°F and a low of ${d.low}°F. ${d.precipProb ? d.precipProb + '% chance of precipitation.' : 'Dry conditions expected.'}`;
+}
+
+function key() { return `${state.lat?.toFixed(2)},${state.lon?.toFixed(2)}`; }
+
+/* ----- RADAR ----- */
+const RADAR_LEGEND = [
+  ['#7fa8c9', 'Fog'], ['#39d353', 'Rain'], ['#f2e74b', 'Storms'], ['#5aa9ff', 'Snow'],
+  ['#ff9ad5', 'Ice'], ['#b388ff', 'Wintry mix'], ['#e53935', 'Hurricane warning'],
+  ['#ff7043', 'Tornado'], ['#fdd835', 'Flood'], ['#9575cd', 'Other'],
+];
+
+function renderRadar() {
+  $('#radarLegend').innerHTML = RADAR_LEGEND
+    .map(([c, l]) => `<div class="legend-item"><span class="legend-swatch" style="background:${c}"></span>${l}</div>`)
+    .join('');
+  if (!state.maps.radar) initRadarMap();
+  else state.maps.radar.setView([state.lat, state.lon], state.maps.radar.getZoom());
+  setTimeout(() => state.maps.radar?.invalidateSize(), 60);
+  renderGraph();
+}
+
+async function initRadarMap() {
+  const map = L.map('radarMap', { zoomControl: true, attributionControl: false }).setView([state.lat, state.lon], 7);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
+  state.maps.radar = map;
+  state.warningsLayer = L.layerGroup().addTo(map);
+  state.stormsLayer = L.layerGroup();
+
+  $('#lyrWarnings').addEventListener('change', (e) => e.target.checked ? state.warningsLayer.addTo(map) : state.warningsLayer.remove());
+  $('#lyrStorms').addEventListener('change', (e) => e.target.checked ? drawStormTracks() : state.stormsLayer.remove());
+  $('#lyrPin').addEventListener('change', (e) => {
+    if (e.target.checked) {
+      state.pinMarker = L.marker([state.lat, state.lon], { draggable: true }).addTo(map);
+      state.pinMarker.on('dragend', () => {
+        const ll = state.pinMarker.getLatLng();
+        setLocation(ll.lat, ll.lng, `Pin: ${ll.lat.toFixed(2)}, ${ll.lng.toFixed(2)}`);
+      });
+    } else if (state.pinMarker) { state.pinMarker.remove(); state.pinMarker = null; }
+  });
+
+  $('#radarSlider').addEventListener('input', (e) => showRadarFrame(+e.target.value));
+  $('#radarPlay').addEventListener('click', toggleRadarPlay);
+
+  await loadRadarFrames();
+  drawWarnings();
+}
+
+async function loadRadarFrames() {
+  try {
+    const data = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
+    const past = data.radar?.past || [];
+    const fut = data.radar?.nowcast || [];
+    state.radar.frames = [...past, ...fut].map((f) => ({ time: f.time, path: f.path }));
+    state.radar.host = data.host;
+    state.radar.idx = past.length - 1;
+    const slider = $('#radarSlider');
+    slider.max = state.radar.frames.length - 1;
+    slider.value = state.radar.idx;
+    showRadarFrame(state.radar.idx);
+  } catch (e) {
+    $('#radarTime').textContent = 'Radar unavailable';
+  }
+}
+
+function showRadarFrame(i) {
+  const r = state.radar; const map = state.maps.radar;
+  if (!r.frames[i] || !map) return;
+  r.idx = i;
+  const f = r.frames[i];
+  const url = `${r.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`;
+  if (r.layer) r.layer.setUrl(url);
+  else r.layer = L.tileLayer(url, { opacity: 0.75, zIndex: 5 }).addTo(map);
+  const now = Date.now() / 1000;
+  $('#radarTime').textContent = `${new Date(f.time * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${f.time > now ? ' (forecast)' : ''}`;
+  $('#radarSlider').value = i;
+}
+
+function toggleRadarPlay() {
+  const r = state.radar;
+  r.playing = !r.playing;
+  $('#radarPlay').innerHTML = r.playing ? '&#10073;&#10073;' : '&#9654;';
+  if (r.playing) {
+    r.timer = setInterval(() => {
+      let n = r.idx + 1; if (n > r.frames.length - 1) n = 0;
+      showRadarFrame(n);
+    }, 600);
+  } else clearInterval(r.timer);
+}
+
+async function drawWarnings() {
+  if (!state.warningsLayer) return;
+  state.warningsLayer.clearLayers();
+  for (const a of state.alerts) {
+    if (!a.area) continue;
+    // mark the alert center with a colored circle (polygon geometry not always present)
+    L.circleMarker([state.lat, state.lon], {
+      radius: 10, color: a.severity === 'Extreme' || a.severity === 'Severe' ? '#e53935' : '#fdd835',
+      fillOpacity: 0.4,
+    }).bindPopup(`<b>${a.event}</b><br>${a.area}`).addTo(state.warningsLayer);
+    break; // single representative marker; full list lives in Severe tab
+  }
+}
+
+async function drawStormTracks() {
+  const map = state.maps.radar;
+  state.stormsLayer.clearLayers().addTo(map);
+  const storms = await ensureStorms();
+  for (const s of storms) {
+    if (Number.isNaN(s.lat) || Number.isNaN(s.lon)) continue;
+    L.marker([s.lat, s.lon]).bindPopup(`<b>${s.name}</b><br>${s.classification} · ${s.intensity} kt`).addTo(state.stormsLayer);
+  }
+}
+
+/* ----- precip graph + breakdown ----- */
+function renderGraph() {
+  const w = state.weather; if (!w) return;
+  const range = +$('#graphRange').value;
+  const hrs = (w.hourly || []).slice(0, range);
+  drawPrecipChart(hrs);
+  // breakdown: came (past windows), coming (next), on-ground (depth/sum)
+  const pw = w.precipWindows || {};
+  const next = hrs;
+  const sum = (arr, k) => arr.reduce((s, h) => s + (h[k] || 0), 0);
+  const breakdown = {
+    snow: { came: pw['6']?.snow ?? 0, coming: r2(sum(next, 'snowfall')), ground: r2(next.at(-1)?.snowDepth ?? next[0]?.snowDepth ?? 0) },
+    rain: { came: r2((pw['6']?.precip ?? 0) - (pw['6']?.snow ?? 0)), coming: r2(sum(next, 'rain')) },
+    mix: { came: 0, coming: r2(sum(next.filter((h) => /sleet|freezing|mix/i.test(h.condition)), 'precip')) },
+    ice: { came: 0, coming: r2(sum(next.filter((h) => /ice|freezing/i.test(h.condition)), 'precip')) },
+  };
+  fillBreakdown('snow', [['Came', breakdown.snow.came + ' in'], ['Coming', breakdown.snow.coming + ' in'], ['On ground', breakdown.snow.ground + ' in']]);
+  fillBreakdown('rain', [['Came', breakdown.rain.came + ' in'], ['Coming', breakdown.rain.coming + ' in']]);
+  fillBreakdown('mix', [['Coming', breakdown.mix.coming + ' in']]);
+  fillBreakdown('ice', [['Coming', breakdown.ice.coming + ' in']]);
+}
+function r2(v) { return Math.round((v || 0) * 100) / 100; }
+function fillBreakdown(type, rows) {
+  const el = $(`.pb-card[data-type="${type}"] .pb-rows`);
+  if (el) el.innerHTML = rows.map(([k, v]) => `${k} <b>${v}</b>`).join('<br>');
+}
+
+function drawPrecipChart(hrs) {
+  const cv = $('#precipChart');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 200;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  if (!hrs.length) return;
+  const pad = { l: 34, r: 8, t: 12, b: 22 };
+  const max = Math.max(0.1, ...hrs.map((h) => h.precip || 0));
+  const x = (i) => pad.l + (i / (hrs.length - 1)) * (W - pad.l - pad.r);
+  const y = (v) => H - pad.b - (v / max) * (H - pad.t - pad.b);
+  // grid + y labels
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.fillStyle = '#aebfdc'; ctx.font = '11px sans-serif';
+  for (let g = 0; g <= 3; g++) {
+    const val = (max * g) / 3; const yy = y(val);
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+    ctx.fillText(val.toFixed(1) + 'in', 2, yy + 3);
+  }
+  // x labels (every few)
+  const step = Math.ceil(hrs.length / 6);
+  hrs.forEach((h, i) => { if (i % step === 0) ctx.fillText(fmtHour(h.time), x(i) - 8, H - 6); });
+  // area fill
+  ctx.beginPath(); ctx.moveTo(x(0), y(0));
+  hrs.forEach((h, i) => ctx.lineTo(x(i), y(h.precip || 0)));
+  ctx.lineTo(x(hrs.length - 1), y(0)); ctx.closePath();
+  const grad = ctx.createLinearGradient(0, pad.t, 0, H);
+  grad.addColorStop(0, 'rgba(88,192,255,.55)'); grad.addColorStop(1, 'rgba(88,192,255,.05)');
+  ctx.fillStyle = grad; ctx.fill();
+  // line
+  ctx.beginPath(); hrs.forEach((h, i) => i ? ctx.lineTo(x(i), y(h.precip || 0)) : ctx.moveTo(x(i), y(h.precip || 0)));
+  ctx.strokeStyle = '#58c0ff'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+/* ----- SNOW ----- */
+function renderSnow() {
+  const w = state.weather; if (!w) return;
+  const snowDays = w.daily.filter((d) => (d.snowSum || 0) > 0);
+  const total = r2(w.daily.reduce((s, d) => s + (d.snowSum || 0), 0));
+  $('#snowSummary').textContent = total > 0
+    ? `${total} in of snow expected over the next 7 days${snowDays.length ? `, mainly ${snowDays.map((d) => fmtDow(d.date)).join(', ')}.` : '.'}`
+    : 'No measurable snowfall is expected in the next 7 days.';
+  $('#snowStrip').innerHTML = w.daily.map((d) => `
+    <div class="day-chip">
+      <div class="dch-dow">${fmtDow(d.date)}</div>
+      <img src="${iconUrl(d.icon)}" alt="" />
+      <div class="dch-hi">${d.snowSum || 0}"</div>
+      <div class="dch-lo">${d.low}°</div>
+    </div>`).join('');
+  if (!state.maps.snow) {
+    const map = L.map('snowMap', { attributionControl: false }).setView([state.lat, state.lon], 6);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
+    // Open-Meteo snow depth overlay via NWS/RainViewer snow isn't tiled; show marker + radar snow frame
+    if (state.radar.host && state.radar.frames.length) {
+      const f = state.radar.frames[state.radar.idx] || state.radar.frames.at(-1);
+      L.tileLayer(`${state.radar.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, { opacity: 0.6 }).addTo(map);
+    }
+    L.marker([state.lat, state.lon]).addTo(map);
+    state.maps.snow = map;
+  }
+  setTimeout(() => state.maps.snow?.invalidateSize(), 60);
+}
+
+/* ----- HURRICANES ----- */
+async function ensureStorms() {
+  if (state.storms) return state.storms;
+  try { state.storms = await getJSON('/api/storms'); } catch (_) { state.storms = []; }
+  return state.storms;
+}
+async function renderHurricanes() {
+  const storms = await ensureStorms();
+  $('#stormList').innerHTML = storms.length
+    ? storms.map((s) => `
+      <div class="storm-card">
+        <span class="sc-cat">${classifyIcon(s.classification)}</span>
+        <div style="flex:1">
+          <div class="sc-name">${s.name} <span class="sev-tag">${s.classification}</span></div>
+          <div class="sc-meta">${s.intensity ? s.intensity + ' kt' : ''} ${s.pressure ? '· ' + s.pressure + ' mb' : ''} ${s.movement ? '· ' + s.movement : ''}</div>
+          ${s.forecastGraphics ? `<a href="${s.forecastGraphics}" target="_blank" rel="noopener">NHC forecast cone &rarr;</a>` : ''}
+        </div>
+      </div>`).join('')
+    : '<div class="empty-state">No active tropical systems right now. The map shows the NOAA tropical outlook area.</div>';
+
+  if (!state.maps.hurricane) {
+    const map = L.map('hurricaneMap', { attributionControl: false }).setView([25, -70], 4);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 10 }).addTo(map);
+    state.maps.hurricane = map;
+  }
+  const map = state.maps.hurricane;
+  setTimeout(() => map.invalidateSize(), 60);
+  if (state.hurricaneMarkers) state.hurricaneMarkers.forEach((m) => m.remove());
+  state.hurricaneMarkers = [];
+  const pts = [];
+  for (const s of storms) {
+    if (Number.isNaN(s.lat) || Number.isNaN(s.lon)) continue;
+    const m = L.marker([s.lat, s.lon]).addTo(map).bindPopup(`<b>${s.name}</b><br>${s.classification} · ${s.intensity} kt<br>${s.movement || ''}`);
+    state.hurricaneMarkers.push(m); pts.push([s.lat, s.lon]);
+  }
+  if (pts.length) map.fitBounds(pts, { padding: [40, 40], maxZoom: 6 });
+}
+function classifyIcon(c = '') {
+  if (/hurricane/i.test(c)) return '🌀';
+  if (/tropical storm/i.test(c)) return '🌧️';
+  if (/depression/i.test(c)) return '💨';
+  return '🌀';
+}
+
+/* ----- SEVERE ----- */
+function renderSevere() {
+  const list = state.alerts;
+  const filterSel = $('#alertFilter');
+  const events = [...new Set(list.map((a) => a.event))];
+  const cur = filterSel.value;
+  filterSel.innerHTML = '<option value="all">All events</option>' + events.map((e) => `<option value="${e}">${e}</option>`).join('');
+  filterSel.value = events.includes(cur) ? cur : 'all';
+  filterSel.onchange = renderSevere;
+
+  const shown = filterSel.value === 'all' ? list : list.filter((a) => a.event === filterSel.value);
+  $('#alertList').innerHTML = shown.length
+    ? shown.map((a, i) => `
+      <div class="alert-card sev-${a.severity}" data-i="${i}">
+        <div class="ac-event">${severityIcon(a.severity)} ${a.event} ${a.severity ? `<span class="sev-tag">${a.severity}</span>` : ''}</div>
+        <div class="ac-area">${a.area || ''} · ${a.source}${a.expires ? ' · until ' + new Date(a.expires).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''}</div>
+        <div class="ac-toggle">Details</div>
+        <div class="ac-desc">${(a.description || a.headline || '').replace(/\n/g, '<br>')}${a.instruction ? '<br><br><b>Instructions:</b> ' + a.instruction.replace(/\n/g, '<br>') : ''}</div>
+      </div>`).join('')
+    : '<div class="empty-state">No active watches or warnings for this area. Stay safe! 🌤️</div>';
+  $$('#alertList .alert-card').forEach((el) => el.querySelector('.ac-toggle').addEventListener('click', () => el.classList.toggle('open')));
+}
+function severityIcon(s) { return s === 'Extreme' || s === 'Severe' ? '⚠️' : 'ℹ️'; }
+
+/* ----- DROUGHT ----- */
+async function renderDrought() {
+  const w = state.weather;
+  if (!state.drought) {
+    try { state.drought = await getJSON(`/api/drought?lat=${state.lat}&lon=${state.lon}`); } catch (_) { state.drought = {}; }
+  }
+  const d = state.drought;
+  $('#droughtLevel').textContent = d.categoryLabel || 'No drought designation';
+  // meter: None=0, D0..D4 -> 20..100%
+  const pct = d.dm != null && d.dm >= 0 ? ((d.dm + 1) / 5) * 100 : 0;
+  $('#droughtMeterFill').style.width = pct + '%';
+
+  if (d.precip) {
+    $('#droughtPrecip').innerHTML = `
+      Last 30 days: <b>${d.precip.last30 ?? '—'} in</b><br>
+      Last 90 days: <b>${d.precip.last90 ?? '—'} in</b><br>
+      <div style="margin-top:8px;color:var(--text-dim);font-size:13px">Recent daily:</div>
+      ${(d.precip.recent || []).map((r) => `${fmtDow(r.date)} ${r.precip} in`).join(' · ')}`;
+  } else {
+    $('#droughtPrecip').textContent = 'Precipitation history unavailable.';
+  }
+
+  if (!state.maps.drought) {
+    const map = L.map('droughtMap', { attributionControl: false }).setView([state.lat, state.lon], 6);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 10 }).addTo(map);
+    // U.S. Drought Monitor WMS overlay (yellow -> red shading)
+    L.tileLayer.wms('https://droughtmonitor.unl.edu/data/wms/usdm_current_wms.php?', {
+      layers: 'usdm_current', format: 'image/png', transparent: true, opacity: 0.55,
+    }).addTo(map);
+    L.marker([state.lat, state.lon]).addTo(map);
+    state.maps.drought = map;
+  }
+  setTimeout(() => state.maps.drought?.invalidateSize(), 60);
+
+  // AI drought summary
+  const el = $('#droughtSummary');
+  el.innerHTML = 'Assessing local drought conditions… <span class="ai-badge">AI</span>';
+  try {
+    const r = await postJSON('/api/ai/drought', { drought: d, location: w?.location, precip: d.precip });
+    el.innerHTML = (r.text || droughtFallback(d)) + ' <span class="ai-badge">AI</span>';
+  } catch (_) { el.innerHTML = droughtFallback(d) + ' <span class="ai-badge">AI</span>'; }
+}
+function droughtFallback(d) {
+  if (!d.categoryLabel || d.category === 'None') return 'No drought is currently designated for this area by the U.S. Drought Monitor.';
+  return `Current status: ${d.categoryLabel}. Recent precipitation has been ${d.precip?.last30 ?? '?'} in over 30 days.`;
+}
+
+/* ------------------------------- alerts/siren -------------------------- */
+async function refreshAlerts(refresh) {
+  try {
+    const list = await getJSON(`/api/alerts?lat=${state.lat}&lon=${state.lon}${refresh ? '&refresh=1' : ''}`);
+    state.alerts = list;
+    handleEmergency(list);
+    if (state.activeNav === 'severe') renderSevere();
+    if (state.warningsLayer) drawWarnings();
+  } catch (e) { console.warn('alerts failed', e); }
+}
+
+function handleEmergency(list) {
+  const emergencies = list.filter((a) => ['Extreme', 'Severe'].includes(a.severity) && /Warning/i.test(a.event));
+  const banner = $('#alertBanner');
+  if (emergencies.length) {
+    const top = emergencies[0];
+    $('#alertBannerText').textContent = `${top.event} — ${top.area || ''}`;
+    banner.classList.remove('hidden');
+    // play siren once per new emergency id (respecting the siren toggle)
+    const newOnes = emergencies.filter((a) => !state.knownStormAlertIds.has(a.id));
+    if (newOnes.length && $('#sirenEnabled').checked) playSiren();
+    emergencies.forEach((a) => state.knownStormAlertIds.add(a.id));
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+function playSiren() {
+  const s = $('#siren');
+  s.currentTime = 0;
+  s.play().catch(() => {/* needs a user gesture first; banner remains visible */});
+}
+function stopSiren() { const s = $('#siren'); s.pause(); s.currentTime = 0; }
+
+/* --------------------------------- UI wiring --------------------------- */
+function wireUI() {
+  // bottom nav
+  $$('.navbtn').forEach((b) => b.addEventListener('click', () => switchNav(b.dataset.nav)));
+  // subtabs
+  $$('.subtabs').forEach((group) => {
+    group.querySelectorAll('.subtab').forEach((tab) => tab.addEventListener('click', () => {
+      group.querySelectorAll('.subtab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      const view = group.closest('.view');
+      view.querySelectorAll('.subview').forEach((sv) => sv.classList.toggle('hidden', sv.dataset.sub !== tab.dataset.sub));
+      if (tab.dataset.sub === 'map' || tab.dataset.sub === 'graph') renderRadar();
+    }));
+  });
+
+  $('#precipWindow').addEventListener('change', renderPrecipWindow);
+  $('#graphRange').addEventListener('change', renderGraph);
+  $('#refreshBtn').addEventListener('click', doRefresh);
+
+  // search
+  const si = $('#searchInput');
+  let t;
+  si.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => doSearch(si.value), 280); });
+  si.addEventListener('focus', () => { if (si.value) doSearch(si.value); });
+  document.addEventListener('click', (e) => { if (!e.target.closest('.search-wrap')) $('#searchResults').classList.add('hidden'); });
+
+  // menu
+  $('#menuBtn').addEventListener('click', () => toggleMenu(true));
+  $('#overlay').addEventListener('click', () => { toggleMenu(false); closeAbout(); });
+  $$('#sideMenu .menu-item').forEach((b) => b.addEventListener('click', () => menuAction(b.dataset.act)));
+  $('#infoBtn').addEventListener('click', openAbout);
+  $('#aboutClose').addEventListener('click', closeAbout);
+  $('#silenceBtn').addEventListener('click', () => { stopSiren(); });
+
+  // a user gesture unlocks audio for later siren playback
+  document.addEventListener('click', unlockAudioOnce, { once: true });
+
+  setupPullToRefresh();
+
+  // health -> AI availability note
+  getJSON('/api/health').then((h) => {
+    $('#aboutAi').textContent = h.ai
+      ? 'AI summaries (weather pattern, daily outlook, drought) are powered by Claude.'
+      : 'AI summaries fall back to provider narratives until an Anthropic API key is configured on the server.';
+  }).catch(() => {});
+}
+
+function unlockAudioOnce() {
+  const s = $('#siren');
+  s.play().then(() => { s.pause(); s.currentTime = 0; }).catch(() => {});
+}
+
+function switchNav(nav) {
+  state.activeNav = nav;
+  $$('.navbtn').forEach((b) => b.classList.toggle('active', b.dataset.nav === nav));
+  $$('.view').forEach((v) => v.classList.toggle('hidden', v.dataset.view !== nav));
+  renderActiveView();
+}
+
+async function doSearch(q) {
+  q = q.trim();
+  const box = $('#searchResults');
+  if (!q) { box.classList.add('hidden'); return; }
+  try {
+    const results = await getJSON(`/api/geocode?q=${encodeURIComponent(q)}`);
+    box.classList.remove('hidden');
+    box.innerHTML = results.length
+      ? results.map((r) => `<div class="sr-item" data-lat="${r.lat}" data-lon="${r.lon}" data-label="${r.label}">${r.label}</div>`).join('')
+      : '<div class="sr-empty">No matches</div>';
+    $$('.sr-item', box).forEach((el) => el.addEventListener('click', () => {
+      setLocation(+el.dataset.lat, +el.dataset.lon, el.dataset.label);
+      box.classList.add('hidden'); $('#searchInput').value = '';
+    }));
+  } catch (_) { box.classList.add('hidden'); }
+}
+
+function setLocation(lat, lon, label) {
+  state.lat = lat; state.lon = lon; state.label = label;
+  state.drought = null; state.selectedDay = 0;
+  // reset maps tied to the old location so they recenter
+  for (const k of ['snow', 'drought']) { if (state.maps[k]) { state.maps[k].remove(); delete state.maps[k]; } }
+  if (state.maps.radar) state.maps.radar.setView([lat, lon], state.maps.radar.getZoom());
+  loadEverything(true);
+}
+
+function doRefresh() {
+  const btn = $('#refreshBtn'); btn.style.transform = 'rotate(360deg)'; btn.style.transition = 'transform .6s';
+  setTimeout(() => { btn.style.transform = ''; btn.style.transition = ''; }, 600);
+  state.drought = null; state.storms = null; state._patternFor = null;
+  loadEverything(true);
+}
+
+function toggleMenu(open) {
+  $('#sideMenu').classList.toggle('hidden', !open);
+  $('#overlay').classList.toggle('hidden', !open && $('#aboutModal').classList.contains('hidden'));
+}
+function menuAction(act) {
+  if (act === 'refresh') { doRefresh(); toggleMenu(false); }
+  else if (act === 'about') { toggleMenu(false); openAbout(); }
+  else if (act === 'locate') { useMyLocation(); toggleMenu(false); }
+}
+async function useMyLocation() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(async (p) => {
+    let label = 'Your location';
+    try { const r = await getJSON(`/api/reverse?lat=${p.coords.latitude}&lon=${p.coords.longitude}`); label = r.label; } catch (_) {}
+    setLocation(p.coords.latitude, p.coords.longitude, label);
+  });
+}
+function openAbout() { $('#aboutModal').classList.remove('hidden'); $('#overlay').classList.remove('hidden'); }
+function closeAbout() { $('#aboutModal').classList.add('hidden'); if ($('#sideMenu').classList.contains('hidden')) $('#overlay').classList.add('hidden'); }
+
+/* pull-to-refresh (swipe down to refresh, per the notes) */
+function setupPullToRefresh() {
+  let startY = 0, pulling = false;
+  const ptr = $('#ptr');
+  window.addEventListener('touchstart', (e) => { if (window.scrollY <= 0) { startY = e.touches[0].clientY; pulling = true; } }, { passive: true });
+  window.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 60) ptr.classList.add('show'); else ptr.classList.remove('show');
+  }, { passive: true });
+  window.addEventListener('touchend', (e) => {
+    if (pulling && ptr.classList.contains('show')) { ptr.classList.remove('show'); doRefresh(); }
+    pulling = false;
+  });
+}
