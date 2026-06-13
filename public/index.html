@@ -21,7 +21,10 @@
       <img src="assets/logo.svg" alt="" class="brand-logo" />
       <div class="brand-text">
         <h1>Weather Watcher</h1>
-        <div id="locLabel" class="loc-label">Locating…</div>
+        <div class="loc-row">
+          <div id="locLabel" class="loc-label">Locating…</div>
+          <button id="favBtn" class="fav-btn" title="Save as favorite" aria-label="Favorite this place">&#9825;</button>
+        </div>
       </div>
     </div>
     <div class="search-wrap">
@@ -67,7 +70,8 @@
 
         <div class="card glass" id="patternCard">
           <h3 class="card-title" id="patternTitle">Weather Pattern</h3>
-          <p id="patternText" class="pattern-text">Analyzing the current weather pattern…</p>
+          <p id="patternText" class="pattern-text">Loading the latest National Weather Service statement…</p>
+          <div id="patternSource" class="pattern-source"></div>
         </div>
 
         <div class="card glass">
@@ -172,8 +176,14 @@
     <!-- ----- HURRICANES ----- -->
     <section class="view hidden" data-view="hurricanes">
       <div id="stormList" class="storm-list"></div>
-      <div id="hurricaneMap" class="map tall"></div>
-      <div class="note">Interactive NOAA / National Hurricane Center 7-day tropical outlook.</div>
+      <div class="subtabs" data-group="hurricanes">
+        <button class="subtab active" data-basin="atlc">Atlantic</button>
+        <button class="subtab" data-basin="epac">E. Pacific</button>
+        <button class="subtab" data-basin="cpac">C. Pacific</button>
+      </div>
+      <iframe id="nhcFrame" class="nhc-frame" title="NOAA National Hurricane Center interactive map"
+              src="https://www.nhc.noaa.gov/?atlc" loading="lazy"></iframe>
+      <div class="note">The three official NOAA / National Hurricane Center interactive tropical maps (Atlantic, Eastern&nbsp;Pacific, Central&nbsp;Pacific). <a id="nhcOpen" href="https://www.nhc.noaa.gov/?atlc" target="_blank" rel="noopener">Open at nhc.noaa.gov &rarr;</a></div>
     </section>
 
     <!-- ----- SEVERE WEATHER ----- -->
@@ -194,7 +204,7 @@
           <h3 class="card-title">Drought Conditions</h3>
           <div id="droughtLevel" class="drought-level">—</div>
           <div id="droughtMeter" class="drought-meter"><div id="droughtMeterFill"></div></div>
-          <p id="droughtSummary" class="pattern-text">Assessing local drought conditions… <span class="ai-badge">AI</span></p>
+          <p id="droughtSummary" class="pattern-text">Assessing local drought conditions…</p>
         </div>
         <div class="card glass">
           <h3 class="card-title">Past Precipitation</h3>
@@ -210,10 +220,10 @@
   <nav class="bottom-nav glass">
     <button class="navbtn active no-icon" data-nav="home"><span class="nl">Home</span></button>
     <button class="navbtn no-icon" data-nav="radar"><span class="nl">Radar</span></button>
-    <button class="navbtn" data-nav="snow"><span class="ni">&#10052;</span><span class="nl">Snow</span></button>
-    <button class="navbtn" data-nav="hurricanes"><span class="ni">&#127786;</span><span class="nl">Hurricanes</span></button>
-    <button class="navbtn" data-nav="severe"><span class="ni">&#9889;</span><span class="nl">Severe</span></button>
-    <button class="navbtn" data-nav="drought"><span class="ni">&#127964;</span><span class="nl">Drought</span></button>
+    <button class="navbtn" data-nav="snow"><span class="ni">&#10052;&#65039;</span><span class="nl">Snow</span></button>
+    <button class="navbtn" data-nav="hurricanes"><span class="ni">&#127744;</span><span class="nl">Hurricanes</span></button>
+    <button class="navbtn" data-nav="severe"><span class="ni">&#127786;</span><span class="nl">Severe Weather</span></button>
+    <button class="navbtn" data-nav="drought"><span class="ni"><img src="assets/drought.svg" class="nav-svg" alt="" /></span><span class="nl">Drought</span></button>
   </nav>
 
   <!-- ============================== SIDE MENU ============================== -->
@@ -221,7 +231,7 @@
   <aside id="sideMenu" class="side-menu glass hidden">
     <h2>Weather Watcher</h2>
     <p class="menu-loc" id="menuLoc"></p>
-    <button class="menu-item" data-act="locate">&#128205; Use my location</button>
+    <button class="menu-item" data-act="locate"><img src="assets/locate.svg" class="menu-svg" alt="" /> Use my location</button>
     <button class="menu-item" data-act="refresh">&#10227; Refresh all data</button>
     <hr />
     <h3>Settings</h3>

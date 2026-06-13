@@ -56,8 +56,8 @@ async function init() {
   wireUI();
   await resolveInitialLocation();
   await loadEverything();
-  // poll alerts every 60s (drives the emergency siren)
-  setInterval(() => refreshAlerts(false), 60000);
+  // poll alerts every 60s (drives the emergency siren + notifications)
+  setInterval(() => { refreshAlerts(false); checkFavoriteAlerts(); }, 60000);
 }
 
 async function resolveInitialLocation() {
@@ -86,13 +86,66 @@ function persistLocation() {
   localStorage.setItem('ww_loc', JSON.stringify({ lat: state.lat, lon: state.lon, label: state.label }));
 }
 
+/* ------------------------------- favorites ----------------------------- */
+function getFavs() { try { return JSON.parse(localStorage.getItem('ww_favs') || '[]'); } catch (_) { return []; } }
+function setFavs(f) { localStorage.setItem('ww_favs', JSON.stringify(f)); }
+function favKey(lat, lon) { return `${(+lat).toFixed(2)},${(+lon).toFixed(2)}`; }
+function isFav(lat, lon) { return getFavs().some((f) => favKey(f.lat, f.lon) === favKey(lat, lon)); }
+function toggleFav(lat, lon, label) {
+  let f = getFavs();
+  const k = favKey(lat, lon);
+  if (f.some((x) => favKey(x.lat, x.lon) === k)) f = f.filter((x) => favKey(x.lat, x.lon) !== k);
+  else f.unshift({ lat: +lat, lon: +lon, label });
+  setFavs(f);
+  updateFavBtn();
+}
+function updateFavBtn() {
+  const btn = $('#favBtn');
+  if (!btn || state.lat == null) return;
+  const fav = isFav(state.lat, state.lon);
+  btn.innerHTML = fav ? '&#9829;' : '&#9825;'; // filled vs outline heart
+  btn.classList.toggle('on', fav);
+  btn.title = fav ? 'Remove favorite' : 'Save as favorite';
+}
+
+/* ------------------------------ notifications -------------------------- */
+function requestNotifyPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (_) {}
+  }
+}
+function notifyUser(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try { new Notification(title, { body: body || '', icon: 'assets/logo.svg', tag: title }); } catch (_) {}
+}
+// Watch favorited places (current location is handled in handleEmergency).
+async function checkFavoriteAlerts() {
+  for (const f of getFavs()) {
+    if (favKey(f.lat, f.lon) === favKey(state.lat, state.lon)) continue;
+    try {
+      const list = await getJSON(`/api/alerts?lat=${f.lat}&lon=${f.lon}`);
+      const emer = list.filter((a) => ['Extreme', 'Severe'].includes(a.severity) && /Warning/i.test(a.event));
+      for (const a of emer) {
+        const id = 'fav:' + a.id;
+        if (state.knownStormAlertIds.has(id)) continue;
+        state.knownStormAlertIds.add(id);
+        notifyUser(`${a.event} — ${f.label}`, a.headline || '');
+        if ($('#sirenEnabled').checked) playSiren();
+      }
+    } catch (_) {}
+  }
+}
+
 async function loadEverything(refresh = false) {
   $('#locLabel').textContent = state.label;
   $('#menuLoc').textContent = state.label;
   persistLocation();
-  await Promise.all([loadWeather(refresh), refreshAlerts(refresh), loadDrought()]);
+  await Promise.all([loadWeather(refresh), refreshAlerts(refresh)]);
+  updateFavBtn();
   // re-render whatever tab is active so it shows fresh data
   renderActiveView();
+  // keep favorites' alerts monitored for notifications
+  checkFavoriteAlerts();
 }
 
 /* ------------------------------- weather ------------------------------- */
@@ -105,11 +158,6 @@ async function loadWeather(refresh) {
   } catch (e) {
     console.error('weather load failed', e);
   }
-}
-
-async function loadDrought() {
-  try { state.drought = await getJSON(`/api/drought?lat=${state.lat}&lon=${state.lon}`); }
-  catch (_) { state.drought = state.drought || {}; }
 }
 
 /* ------------------------------- rendering ----------------------------- */
@@ -250,44 +298,43 @@ function selectDay(i) {
 }
 
 /* ----- Weather Pattern card -----
-   Shows the dominant active hazard (Flood, Tornado, Drought, etc.) with an
-   overview. Falls back to the general weather pattern when nothing notable is
-   happening. */
-async function renderPattern() {
+   Posts ONLY official National Weather Service statements — never our own text.
+   If there is an active NWS alert, it shows the hazard and the official alert
+   wording; otherwise it shows the official NWS forecast statement. */
+function renderPattern() {
   const titleEl = $('#patternTitle');
   const bodyEl = $('#patternText');
-  const hz = detectHazard();
-  titleEl.textContent = hz.title;
+  const srcEl = $('#patternSource');
+  const w = state.weather;
+
+  // only genuine NWS-issued alerts (not third-party feeds)
+  const nwsAlerts = (state.alerts || []).filter((a) => a.source === 'NWS');
+  const hz = detectHazard(nwsAlerts);
 
   if (hz.kind === 'alert') {
+    titleEl.textContent = hz.title;
     bodyEl.textContent = hz.body;
+    srcEl.textContent = `National Weather Service${hz.alert.expires ? ' · in effect until ' + new Date(hz.alert.expires).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''}`;
     return;
   }
-  if (hz.kind === 'drought') {
-    bodyEl.textContent = state._droughtText || droughtFallback(state.drought);
-    if (state._droughtFor !== key()) {
-      state._droughtFor = key();
-      try {
-        const r = await postJSON('/api/ai/drought', { drought: state.drought, location: state.weather?.location, precip: state.drought?.precip });
-        if (r.text) { state._droughtText = r.text; if (detectHazard().kind === 'drought') bodyEl.textContent = r.text; }
-      } catch (_) {}
-    }
-    return;
-  }
-  // default: general weather pattern
-  bodyEl.textContent = state._patternAI || fallbackPattern();
-  if (state._patternFor !== key()) {
-    state._patternFor = key();
-    try {
-      const r = await postJSON('/api/ai/pattern', state.weather);
-      if (r.text) { state._patternAI = r.text; if (detectHazard().kind === 'pattern') bodyEl.textContent = r.text; }
-    } catch (_) {}
+
+  // no active alert -> official NWS forecast statement
+  const periods = w?.narratives?.nwsForecast || [];
+  if (periods.length) {
+    const first = periods[0];
+    const colon = first.indexOf(':');
+    titleEl.textContent = colon > 0 ? first.slice(0, colon).trim() : 'Forecast';
+    bodyEl.textContent = colon > 0 ? first.slice(colon + 1).trim() : first;
+    srcEl.textContent = 'National Weather Service forecast';
+  } else {
+    titleEl.textContent = 'Weather Pattern';
+    bodyEl.textContent = 'No National Weather Service statement is available for this location.';
+    srcEl.textContent = '';
   }
 }
 
-// Pick the most significant active hazard from alerts + drought status.
-function detectHazard() {
-  const alerts = state.alerts || [];
+// Pick the most significant active hazard from a list of NWS alerts.
+function detectHazard(alerts) {
   const pick = (re) => alerts.find((a) => re.test(a.event || ''));
   const order = [
     [/tornado/i, 'Tornado'],
@@ -303,24 +350,17 @@ function detectHazard() {
   ];
   for (const [re, label] of order) {
     const a = pick(re);
-    if (a) return { kind: 'alert', title: label, body: cleanDesc(a) };
+    if (a) return { kind: 'alert', title: label, body: cleanDesc(a), alert: a };
   }
-  const d = state.drought;
-  if (d && d.dm >= 1) return { kind: 'drought', title: 'Drought', body: null };
-  return { kind: 'pattern', title: 'Weather Pattern', body: null };
+  return { kind: 'none' };
 }
 
-// Trim an alert into a short overview (first few sentences).
+// Trim an official alert into a short overview (first few sentences).
 function cleanDesc(a) {
   const raw = (a.description || a.headline || '').replace(/\s+/g, ' ').trim();
   if (!raw) return a.event;
-  const sentences = raw.split(/(?<=[.!?])\s+/).slice(0, 3).join(' ');
-  return sentences.length > 360 ? sentences.slice(0, 357) + '…' : sentences;
-}
-
-function fallbackPattern() {
-  const n = state.weather?.narratives;
-  return n?.pirateSummary || (n?.nwsForecast?.[0]) || 'Current conditions are shown above.';
+  const sentences = raw.split(/(?<=[.!?])\s+/).slice(0, 4).join(' ');
+  return sentences.length > 420 ? sentences.slice(0, 417) + '…' : sentences;
 }
 
 async function loadDailySummary(d, i) {
@@ -359,7 +399,7 @@ function renderRadar() {
 }
 
 async function initRadarMap() {
-  const map = L.map('radarMap', { zoomControl: true, attributionControl: false }).setView([state.lat, state.lon], 7);
+  const map = L.map('radarMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 7);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
   state.maps.radar = map;
   state.warningsLayer = L.layerGroup().addTo(map);
@@ -527,7 +567,7 @@ function renderSnow() {
       <div class="dch-lo">${d.low}°</div>
     </div>`).join('');
   if (!state.maps.snow) {
-    const map = L.map('snowMap', { attributionControl: false }).setView([state.lat, state.lon], 6);
+    const map = L.map('snowMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 6);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
     // Open-Meteo snow depth overlay via NWS/RainViewer snow isn't tiled; show marker + radar snow frame
     if (state.radar.host && state.radar.frames.length) {
@@ -558,24 +598,8 @@ async function renderHurricanes() {
           ${s.forecastGraphics ? `<a href="${s.forecastGraphics}" target="_blank" rel="noopener">NHC forecast cone &rarr;</a>` : ''}
         </div>
       </div>`).join('')
-    : '<div class="empty-state">No active tropical systems right now. The map shows the NOAA tropical outlook area.</div>';
-
-  if (!state.maps.hurricane) {
-    const map = L.map('hurricaneMap', { attributionControl: false }).setView([25, -70], 4);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 10 }).addTo(map);
-    state.maps.hurricane = map;
-  }
-  const map = state.maps.hurricane;
-  setTimeout(() => map.invalidateSize(), 60);
-  if (state.hurricaneMarkers) state.hurricaneMarkers.forEach((m) => m.remove());
-  state.hurricaneMarkers = [];
-  const pts = [];
-  for (const s of storms) {
-    if (Number.isNaN(s.lat) || Number.isNaN(s.lon)) continue;
-    const m = L.marker([s.lat, s.lon]).addTo(map).bindPopup(`<b>${s.name}</b><br>${s.classification} · ${s.intensity} kt<br>${s.movement || ''}`);
-    state.hurricaneMarkers.push(m); pts.push([s.lat, s.lon]);
-  }
-  if (pts.length) map.fitBounds(pts, { padding: [40, 40], maxZoom: 6 });
+    : '<div class="empty-state">No active tropical systems right now. The official NOAA maps below show the latest tropical outlook.</div>';
+  // the maps themselves are NOAA's official interactive maps (iframes); see wireUI for basin switching
 }
 function classifyIcon(c = '') {
   if (/hurricane/i.test(c)) return '🌀';
@@ -606,7 +630,7 @@ function renderSevere() {
     : '<div class="empty-state">No active watches or warnings for this area. Stay safe! 🌤️</div>';
   $$('#alertList .alert-card').forEach((el) => el.querySelector('.ac-toggle').addEventListener('click', () => el.classList.toggle('open')));
 }
-function severityIcon(s) { return s === 'Extreme' || s === 'Severe' ? '⚠️' : 'ℹ️'; }
+function severityIcon(_s) { return '⚠️'; }
 
 /* ----- DROUGHT ----- */
 async function renderDrought() {
@@ -631,25 +655,49 @@ async function renderDrought() {
   }
 
   if (!state.maps.drought) {
-    const map = L.map('droughtMap', { attributionControl: false }).setView([state.lat, state.lon], 6);
+    const map = L.map('droughtMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 6);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 10 }).addTo(map);
-    // U.S. Drought Monitor WMS overlay (yellow -> red shading)
-    L.tileLayer.wms('https://droughtmonitor.unl.edu/data/wms/usdm_current_wms.php?', {
-      layers: 'usdm_current', format: 'image/png', transparent: true, opacity: 0.55,
-    }).addTo(map);
-    L.marker([state.lat, state.lon]).addTo(map);
+    // U.S. Drought Monitor polygons (official), shaded yellow -> red by category
+    state.droughtGeo = L.geoJSON(null, { style: droughtStyle }).addTo(map);
+    L.circleMarker([state.lat, state.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#1a73e8', fillOpacity: 1 }).addTo(map);
+    map.on('moveend', () => loadDroughtPolygons(map));
     state.maps.drought = map;
+    loadDroughtPolygons(map);
+  } else {
+    state.maps.drought.setView([state.lat, state.lon], state.maps.drought.getZoom());
   }
   setTimeout(() => state.maps.drought?.invalidateSize(), 60);
 
-  // AI drought summary
+  // drought summary
   const el = $('#droughtSummary');
-  el.innerHTML = 'Assessing local drought conditions… <span class="ai-badge">AI</span>';
+  el.textContent = 'Assessing local drought conditions…';
   try {
     const r = await postJSON('/api/ai/drought', { drought: d, location: w?.location, precip: d.precip });
-    el.innerHTML = (r.text || droughtFallback(d)) + ' <span class="ai-badge">AI</span>';
-  } catch (_) { el.innerHTML = droughtFallback(d) + ' <span class="ai-badge">AI</span>'; }
+    el.textContent = r.text || droughtFallback(d);
+  } catch (_) { el.textContent = droughtFallback(d); }
 }
+// D0..D4 shading (yellow -> dark red), matching the U.S. Drought Monitor.
+const DM_COLORS = ['#ffff00', '#fcd37f', '#ffaa00', '#e60000', '#730000'];
+function droughtStyle(f) {
+  const c = DM_COLORS[f.properties.DM] || '#888';
+  return { color: c, weight: 1, fillColor: c, fillOpacity: 0.45 };
+}
+async function loadDroughtPolygons(map) {
+  if (!state.droughtGeo) return;
+  try {
+    const b = map.getBounds();
+    const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+    const url =
+      'https://services5.arcgis.com/0OTVzJS4K09zlixn/arcgis/rest/services/USDM_current/FeatureServer/0/query' +
+      `?where=DM%3E%3D0&geometry=${encodeURIComponent(bbox)}&geometryType=esriGeometryEnvelope&inSR=4326` +
+      '&spatialRel=esriSpatialRelIntersects&outFields=DM&returnGeometry=true&f=geojson&outSR=4326' +
+      '&maxAllowableOffset=0.02&geometryPrecision=3';
+    const gj = await getJSON(url);
+    state.droughtGeo.clearLayers();
+    if (gj.features?.length) state.droughtGeo.addData(gj);
+  } catch (e) { console.warn('drought polygons failed', e); }
+}
+
 function droughtFallback(d) {
   if (!d.categoryLabel || d.category === 'None') return 'No drought is currently designated for this area by the U.S. Drought Monitor.';
   return `Current status: ${d.categoryLabel}. Recent precipitation has been ${d.precip?.last30 ?? '?'} in over 30 days.`;
@@ -673,9 +721,10 @@ function handleEmergency(list) {
     const top = emergencies[0];
     $('#alertBannerText').textContent = `${top.event} — ${top.area || ''}`;
     banner.classList.remove('hidden');
-    // play siren once per new emergency id (respecting the siren toggle)
+    // play siren + notify once per new emergency id (respecting the siren toggle)
     const newOnes = emergencies.filter((a) => !state.knownStormAlertIds.has(a.id));
     if (newOnes.length && $('#sirenEnabled').checked) playSiren();
+    newOnes.forEach((a) => notifyUser(`${a.event} — ${state.label}`, a.headline || ''));
     emergencies.forEach((a) => state.knownStormAlertIds.add(a.id));
   } else {
     banner.classList.add('hidden');
@@ -712,8 +761,18 @@ function wireUI() {
   const si = $('#searchInput');
   let t;
   si.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => doSearch(si.value), 280); });
-  si.addEventListener('focus', () => { if (si.value) doSearch(si.value); });
+  si.addEventListener('focus', () => doSearch(si.value));
   document.addEventListener('click', (e) => { if (!e.target.closest('.search-wrap')) $('#searchResults').classList.add('hidden'); });
+
+  // favorite the current place
+  $('#favBtn').addEventListener('click', () => { if (state.lat != null) toggleFav(state.lat, state.lon, state.label); });
+
+  // hurricanes: switch between NOAA's three official basin maps
+  $$('.subtabs[data-group="hurricanes"] .subtab').forEach((tab) => tab.addEventListener('click', () => {
+    const basin = tab.dataset.basin;
+    $('#nhcFrame').src = `https://www.nhc.noaa.gov/?${basin}`;
+    $('#nhcOpen').href = `https://www.nhc.noaa.gov/?${basin}`;
+  }));
 
   // menu
   $('#menuBtn').addEventListener('click', () => toggleMenu(true));
@@ -739,6 +798,7 @@ function wireUI() {
 function unlockAudioOnce() {
   const s = $('#siren');
   s.play().then(() => { s.pause(); s.currentTime = 0; }).catch(() => {});
+  requestNotifyPermission();
 }
 
 function switchNav(nav) {
@@ -749,20 +809,47 @@ function switchNav(nav) {
 }
 
 async function doSearch(q) {
-  q = q.trim();
+  q = (q || '').trim();
   const box = $('#searchResults');
-  if (!q) { box.classList.add('hidden'); return; }
-  try {
-    const results = await getJSON(`/api/geocode?q=${encodeURIComponent(q)}`);
-    box.classList.remove('hidden');
-    box.innerHTML = results.length
-      ? results.map((r) => `<div class="sr-item" data-lat="${r.lat}" data-lon="${r.lon}" data-label="${r.label}">${r.label}</div>`).join('')
-      : '<div class="sr-empty">No matches</div>';
-    $$('.sr-item', box).forEach((el) => el.addEventListener('click', () => {
-      setLocation(+el.dataset.lat, +el.dataset.lon, el.dataset.label);
-      box.classList.add('hidden'); $('#searchInput').value = '';
-    }));
-  } catch (_) { box.classList.add('hidden'); }
+  let results = [];
+  if (q) { try { results = await getJSON(`/api/geocode?q=${encodeURIComponent(q)}`); } catch (_) {} }
+  renderSearchList(box, q, getFavs(), results);
+}
+
+function renderSearchList(box, q, favs, results) {
+  box.classList.remove('hidden');
+  // favorites first (all when no query, else those that match) — they "pop up near the top"
+  const favShown = q ? favs.filter((f) => f.label.toLowerCase().includes(q.toLowerCase())) : favs;
+  const others = results.filter((r) => !favShown.some((f) => favKey(f.lat, f.lon) === favKey(r.lat, r.lon)));
+  let html = '';
+  if (favShown.length) {
+    html += '<div class="sr-section">Favorites</div>' + favShown.map((f) => srItem(f.lat, f.lon, f.label, true)).join('');
+  }
+  if (others.length) {
+    if (favShown.length) html += '<div class="sr-section">Search results</div>';
+    html += others.map((r) => srItem(r.lat, r.lon, r.label, isFav(r.lat, r.lon))).join('');
+  }
+  if (!html) html = q ? '<div class="sr-empty">No matches</div>' : '<div class="sr-empty">Search for a town, or tap the ♥ to save favorites.</div>';
+  box.innerHTML = html;
+
+  $$('.sr-item', box).forEach((el) => el.addEventListener('click', (e) => {
+    if (e.target.closest('.sr-heart')) return;
+    setLocation(+el.dataset.lat, +el.dataset.lon, el.dataset.label);
+    box.classList.add('hidden'); $('#searchInput').value = '';
+  }));
+  $$('.sr-heart', box).forEach((el) => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleFav(+el.dataset.lat, +el.dataset.lon, el.dataset.label);
+    doSearch($('#searchInput').value);
+  }));
+}
+
+function srItem(lat, lon, label, fav) {
+  const safe = String(label).replace(/"/g, '&quot;');
+  return `<div class="sr-item" data-lat="${lat}" data-lon="${lon}" data-label="${safe}">
+    <span class="sr-label">${label}</span>
+    <button class="sr-heart ${fav ? 'on' : ''}" data-lat="${lat}" data-lon="${lon}" data-label="${safe}" title="${fav ? 'Remove favorite' : 'Add favorite'}">${fav ? '&#9829;' : '&#9825;'}</button>
+  </div>`;
 }
 
 function setLocation(lat, lon, label) {
@@ -792,13 +879,26 @@ function menuAction(act) {
   else if (act === 'about') { toggleMenu(false); openAbout(); }
   else if (act === 'locate') { useMyLocation(); toggleMenu(false); }
 }
-async function useMyLocation() {
-  if (!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(async (p) => {
-    let label = 'Your location';
-    try { const r = await getJSON(`/api/reverse?lat=${p.coords.latitude}&lon=${p.coords.longitude}`); label = r.label; } catch (_) {}
-    setLocation(p.coords.latitude, p.coords.longitude, label);
-  });
+function useMyLocation() {
+  if (!navigator.geolocation) { alert('Geolocation is not supported by this browser.'); return; }
+  $('#locLabel').textContent = 'Locating…';
+  navigator.geolocation.getCurrentPosition(
+    async (p) => {
+      let label = 'Your location';
+      try { const r = await getJSON(`/api/reverse?lat=${p.coords.latitude}&lon=${p.coords.longitude}`); label = r.label; } catch (_) {}
+      setLocation(p.coords.latitude, p.coords.longitude, label);
+    },
+    (err) => {
+      $('#locLabel').textContent = state.label;
+      const msg = err.code === 1
+        ? 'Location access was denied. Allow location for this site in your browser settings, then try again.'
+        : err.code === 3
+        ? 'Getting your location timed out. Please try again.'
+        : 'Could not get your location. Please search for your town instead.';
+      alert(msg);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
 }
 function openAbout() { $('#aboutModal').classList.remove('hidden'); $('#overlay').classList.remove('hidden'); }
 function closeAbout() { $('#aboutModal').classList.add('hidden'); if ($('#sideMenu').classList.contains('hidden')) $('#overlay').classList.add('hidden'); }

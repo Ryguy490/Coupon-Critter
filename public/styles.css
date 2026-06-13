@@ -60,7 +60,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .brand-logo { width: 38px; height: 38px; flex: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,.4)); }
 .brand-text { min-width: 0; }
 .brand-text h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; white-space: nowrap; }
-.loc-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.loc-row { display: flex; align-items: center; gap: 4px; }
+.loc-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.fav-btn { background: transparent; border: none; color: var(--text-dim); font-size: 16px; line-height: 1; padding: 2px 4px; cursor: pointer; transition: transform .15s, color .15s; }
+.fav-btn:hover { transform: scale(1.15); }
+.fav-btn.on { color: #ff4d8d; }
 
 .search-wrap { position: relative; margin-left: auto; }
 #searchInput {
@@ -74,8 +78,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border-radius: 12px; z-index: 60; padding: 6px;
   background: var(--bg-2); border: 1px solid var(--glass-brd);
 }
-.search-results .sr-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.search-results .sr-item { padding: 9px 8px 9px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 8px; }
 .search-results .sr-item:hover { background: rgba(255,255,255,.1); }
+.sr-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-heart { background: transparent; border: none; color: var(--text-dim); font-size: 16px; padding: 2px 6px; cursor: pointer; flex: none; }
+.sr-heart.on { color: #ff4d8d; }
+.sr-section { padding: 8px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
 .sr-empty { padding: 12px; color: var(--text-dim); font-size: 13px; }
 
 /* --------------------------- alert banner ------------------------------ */
@@ -143,6 +151,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   padding: 2px 7px; border-radius: 999px; vertical-align: middle; margin-left: 6px; letter-spacing: .5px;
 }
 .pattern-text { margin: 0; line-height: 1.55; font-size: 14.5px; color: #e7eeff; }
+.pattern-source { margin-top: 10px; font-size: 12px; color: var(--text-dim); font-style: italic; }
 
 /* --------------------------- precip / intensity ------------------------ */
 .precip-readout { font-size: 15px; line-height: 1.7; }
@@ -201,6 +210,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .map { height: 56vh; min-height: 340px; border-radius: var(--radius); overflow: hidden; margin-bottom: 12px; border: 1px solid var(--glass-brd); }
 .map.tall { height: 62vh; }
 .leaflet-container { background: #0a1730; }
+.nhc-frame { width: 100%; height: 70vh; min-height: 420px; border: 1px solid var(--glass-brd); border-radius: var(--radius); background: #fff; margin-bottom: 12px; }
 
 .radar-controls { border-radius: 14px; padding: 12px; margin-bottom: 12px; }
 .timeline-row { display: flex; align-items: center; gap: 10px; }
@@ -268,11 +278,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .navbtn {
   flex: 1; background: transparent; border: none; color: var(--text-dim);
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  font-size: 10.5px; transition: color .15s;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  transition: color .15s;
 }
-.navbtn .ni { font-size: 20px; }
-.navbtn.no-icon .nl { font-size: 14px; font-weight: 600; }
+.navbtn .ni { font-size: 22px; line-height: 1; }
+.navbtn .nl { font-size: 12.5px; font-weight: 600; }
+.navbtn.no-icon { justify-content: center; }
+.navbtn.no-icon .nl { font-size: 15px; }
+.nav-svg { width: 22px; height: 22px; display: block; }
 .navbtn.active { color: var(--accent-2); }
 .navbtn.active .ni { filter: drop-shadow(0 0 8px rgba(88,192,255,.6)); }
 
@@ -290,6 +303,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .side-menu hr { border: none; border-top: 1px solid var(--glass-brd); margin: 16px 0; }
 .menu-item { display: block; width: 100%; text-align: left; background: transparent; border: none; padding: 12px 10px; border-radius: 10px; font-size: 15px; }
 .menu-item:hover { background: rgba(255,255,255,.1); }
+.menu-svg { width: 18px; height: 18px; vertical-align: -3px; margin-right: 4px; }
 .menu-toggle { display: flex; align-items: center; gap: 10px; padding: 10px; font-size: 15px; }
 
 /* ------------------------------- modal --------------------------------- */
@@ -309,8 +323,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 @media (max-width: 480px) {
   .brand-text h1 { font-size: 16px; }
-  .loc-label { max-width: 110px; }
-  #searchInput { width: 130px; }
+  .loc-label { max-width: 96px; }
+  #searchInput { width: 120px; }
   .precip-breakdown { grid-template-columns: 1fr; }
-  .navbtn .nl { font-size: 9.5px; }
+  .bottom-nav { height: 64px; }
+  .navbtn { padding: 0 1px; }
+  .navbtn .nl { font-size: 11px; line-height: 1.05; white-space: normal; text-align: center; }
+  .navbtn.no-icon .nl { font-size: 13px; }
 }
