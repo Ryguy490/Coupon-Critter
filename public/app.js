@@ -400,10 +400,16 @@ function renderRadar() {
 
 async function initRadarMap() {
   const map = L.map('radarMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 7);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
   state.maps.radar = map;
   state.warningsLayer = L.layerGroup().addTo(map);
   state.stormsLayer = L.layerGroup();
+
+  // forecast precipitation layer (Environment Canada GeoMet HRDPS, hourly, free)
+  state.radar.geoLayer = L.tileLayer.wms('https://geo.weather.gc.ca/geomet?', {
+    layers: 'HRDPS.CONTINENTAL_PR', format: 'image/png', transparent: true,
+    version: '1.3.0', opacity: 0.6, zIndex: 5,
+  });
 
   $('#lyrWarnings').addEventListener('change', (e) => e.target.checked ? state.warningsLayer.addTo(map) : state.warningsLayer.remove());
   $('#lyrStorms').addEventListener('change', (e) => e.target.checked ? drawStormTracks() : state.stormsLayer.remove());
@@ -425,20 +431,52 @@ async function initRadarMap() {
 }
 
 async function loadRadarFrames() {
+  const slider = $('#radarSlider');
+  const frames = [];
+
+  // 1) RainViewer — real observed radar (last ~2h + short nowcast)
   try {
     const data = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
-    const past = data.radar?.past || [];
-    const fut = data.radar?.nowcast || [];
-    state.radar.frames = [...past, ...fut].map((f) => ({ time: f.time, path: f.path }));
     state.radar.host = data.host;
-    state.radar.idx = past.length - 1;
-    const slider = $('#radarSlider');
-    slider.max = state.radar.frames.length - 1;
-    slider.value = state.radar.idx;
-    showRadarFrame(state.radar.idx);
-  } catch (e) {
-    $('#radarTime').textContent = 'Radar unavailable';
-  }
+    for (const f of [...(data.radar?.past || []), ...(data.radar?.nowcast || [])]) {
+      frames.push({ type: 'radar', time: f.time, path: f.path });
+    }
+  } catch (e) { /* radar may be momentarily unavailable */ }
+
+  // 2) GeoMet HRDPS — forecast precipitation, hourly out to +24h
+  try {
+    const range = await geometTimeRange();
+    if (range) {
+      const nowMs = Date.now();
+      const limit = nowMs + 24 * 3600e3;
+      let t = Math.ceil(nowMs / 3600e3) * 3600e3; // next top of hour
+      t = Math.max(t, range.start);
+      for (; t <= Math.min(limit, range.end); t += 3600e3) {
+        frames.push({ type: 'forecast', time: Math.floor(t / 1000), iso: new Date(t).toISOString().replace('.000', '') });
+      }
+    }
+  } catch (e) { /* forecast layer optional */ }
+
+  frames.sort((a, b) => a.time - b.time);
+  state.radar.frames = frames;
+  if (!frames.length) { $('#radarTime').textContent = 'Radar unavailable'; return; }
+
+  const nowS = Date.now() / 1000;
+  let idx = frames.findIndex((f) => f.time >= nowS);
+  if (idx < 0) idx = frames.length - 1;
+  state.radar.idx = idx;
+  slider.max = frames.length - 1;
+  slider.value = idx;
+  showRadarFrame(idx);
+}
+
+// Read the HRDPS precipitation layer's valid time window from GeoMet capabilities.
+async function geometTimeRange() {
+  const res = await fetch('https://geo.weather.gc.ca/geomet?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities&LAYER=HRDPS.CONTINENTAL_PR');
+  const txt = await res.text();
+  const m = txt.match(/name="time"[^>]*>\s*([0-9T:Z-]+)\/([0-9T:Z-]+)/i);
+  if (!m) return null;
+  return { start: Date.parse(m[1]), end: Date.parse(m[2]) };
 }
 
 function showRadarFrame(i) {
@@ -446,11 +484,22 @@ function showRadarFrame(i) {
   if (!r.frames[i] || !map) return;
   r.idx = i;
   const f = r.frames[i];
-  const url = `${r.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`;
-  if (r.layer) r.layer.setUrl(url);
-  else r.layer = L.tileLayer(url, { opacity: 0.75, zIndex: 5 }).addTo(map);
+
+  if (f.type === 'forecast') {
+    if (r.layer && map.hasLayer(r.layer)) map.removeLayer(r.layer);
+    if (!map.hasLayer(r.geoLayer)) r.geoLayer.addTo(map);
+    r.geoLayer.setParams({ time: f.iso });
+  } else {
+    if (r.geoLayer && map.hasLayer(r.geoLayer)) map.removeLayer(r.geoLayer);
+    const url = `${r.host}${f.path}/256/{z}/{x}/{y}/4/1_1.png`; // scheme 4 = light rain green
+    if (r.layer) { r.layer.setUrl(url); if (!map.hasLayer(r.layer)) r.layer.addTo(map); }
+    else r.layer = L.tileLayer(url, { opacity: 0.8, zIndex: 5 }).addTo(map);
+  }
+
+  const d = new Date(f.time * 1000);
   const now = Date.now() / 1000;
-  $('#radarTime').textContent = `${new Date(f.time * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${f.time > now ? ' (forecast)' : ''}`;
+  const when = d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  $('#radarTime').textContent = f.time > now ? `${when} · forecast` : when;
   $('#radarSlider').value = i;
 }
 
@@ -570,9 +619,10 @@ function renderSnow() {
     const map = L.map('snowMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 6);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
     // Open-Meteo snow depth overlay via NWS/RainViewer snow isn't tiled; show marker + radar snow frame
-    if (state.radar.host && state.radar.frames.length) {
-      const f = state.radar.frames[state.radar.idx] || state.radar.frames.at(-1);
-      L.tileLayer(`${state.radar.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, { opacity: 0.6 }).addTo(map);
+    if (state.radar.host) {
+      const radarFrames = state.radar.frames.filter((f) => f.type === 'radar');
+      const f = radarFrames[radarFrames.length - 1];
+      if (f) L.tileLayer(`${state.radar.host}${f.path}/256/{z}/{x}/{y}/4/1_1.png`, { opacity: 0.6 }).addTo(map);
     }
     L.marker([state.lat, state.lon]).addTo(map);
     state.maps.snow = map;
