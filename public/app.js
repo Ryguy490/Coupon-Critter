@@ -382,10 +382,17 @@ function dailyFallback(d) {
 function key() { return `${state.lat?.toFixed(2)},${state.lon?.toFixed(2)}`; }
 
 /* ----- RADAR ----- */
+// NWS NEXRAD base-reflectivity color scale (the same ramp the Weather Channel uses):
+// light returns green, building through yellow/orange/red to magenta for the most intense.
 const RADAR_LEGEND = [
-  ['#7fa8c9', 'Fog'], ['#39d353', 'Rain'], ['#f2e74b', 'Storms'], ['#5aa9ff', 'Snow'],
-  ['#ff9ad5', 'Ice'], ['#b388ff', 'Wintry mix'], ['#e53935', 'Hurricane warning'],
-  ['#ff7043', 'Tornado'], ['#fdd835', 'Flood'], ['#9575cd', 'Other'],
+  ['#04e9e7', 'Very light'],
+  ['#02fd02', 'Light rain'],
+  ['#008e00', 'Rain'],
+  ['#fdf802', 'Moderate'],
+  ['#fd9500', 'Heavy'],
+  ['#fd0000', 'Very heavy'],
+  ['#bc0000', 'Intense'],
+  ['#f800fd', 'Hail / extreme'],
 ];
 
 function renderRadar() {
@@ -405,10 +412,12 @@ async function initRadarMap() {
   state.warningsLayer = L.layerGroup().addTo(map);
   state.stormsLayer = L.layerGroup();
 
-  // forecast precipitation layer (Environment Canada GeoMet HRDPS, hourly, free)
+  // forecast precipitation layer (Environment Canada GeoMet HRDPS, hourly, free).
+  // The "Precip-Accum_0to40mm_Dis" style is green->yellow->orange->red, matching
+  // the NWS/Weather Channel reflectivity colors used by the observed radar.
   state.radar.geoLayer = L.tileLayer.wms('https://geo.weather.gc.ca/geomet?', {
-    layers: 'HRDPS.CONTINENTAL_PR', format: 'image/png', transparent: true,
-    version: '1.3.0', opacity: 0.6, zIndex: 5,
+    layers: 'HRDPS.CONTINENTAL_PR', styles: 'Precip-Accum_0to40mm_Dis',
+    format: 'image/png', transparent: true, version: '1.3.0', opacity: 0.65, zIndex: 5,
   });
 
   $('#lyrWarnings').addEventListener('change', (e) => e.target.checked ? state.warningsLayer.addTo(map) : state.warningsLayer.remove());
@@ -434,22 +443,22 @@ async function loadRadarFrames() {
   const slider = $('#radarSlider');
   const frames = [];
 
-  // 1) RainViewer — real observed radar (last ~2h + short nowcast)
-  try {
-    const data = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
-    state.radar.host = data.host;
-    for (const f of [...(data.radar?.past || []), ...(data.radar?.nowcast || [])]) {
-      frames.push({ type: 'radar', time: f.time, path: f.path });
-    }
-  } catch (e) { /* radar may be momentarily unavailable */ }
+  // 1) Observed radar — real NWS NEXRAD base reflectivity (Iowa Mesonet RIDGE
+  //    composite), 5-minute steps over the last ~90 minutes. Native NWS colors.
+  const stepMs = 5 * 60e3;
+  const latest = Math.floor(Date.now() / stepMs) * stepMs;
+  for (let t = latest - 90 * 60e3; t <= latest; t += stepMs) {
+    frames.push({ type: 'radar', time: Math.floor(t / 1000), ts: utcStamp(new Date(t)) });
+  }
+  const lastObserved = frames.length - 1;
 
-  // 2) GeoMet HRDPS — forecast precipitation, hourly out to +24h
+  // 2) Forecast precipitation — Environment Canada GeoMet HRDPS, hourly to +24h.
   try {
     const range = await geometTimeRange();
     if (range) {
       const nowMs = Date.now();
       const limit = nowMs + 24 * 3600e3;
-      let t = Math.ceil(nowMs / 3600e3) * 3600e3; // next top of hour
+      let t = Math.ceil(nowMs / 3600e3) * 3600e3;
       t = Math.max(t, range.start);
       for (; t <= Math.min(limit, range.end); t += 3600e3) {
         frames.push({ type: 'forecast', time: Math.floor(t / 1000), iso: new Date(t).toISOString().replace('.000', '') });
@@ -461,13 +470,20 @@ async function loadRadarFrames() {
   state.radar.frames = frames;
   if (!frames.length) { $('#radarTime').textContent = 'Radar unavailable'; return; }
 
-  const nowS = Date.now() / 1000;
-  let idx = frames.findIndex((f) => f.time >= nowS);
+  // start on the most recent observed frame
+  const startTs = frames[lastObserved]?.ts;
+  let idx = frames.findIndex((f) => f.ts === startTs);
   if (idx < 0) idx = frames.length - 1;
   state.radar.idx = idx;
   slider.max = frames.length - 1;
   slider.value = idx;
   showRadarFrame(idx);
+}
+
+// UTC timestamp YYYYMMDDHHMM for the IEM RIDGE tile cache.
+function utcStamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}`;
 }
 
 // Read the HRDPS precipitation layer's valid time window from GeoMet capabilities.
@@ -491,9 +507,9 @@ function showRadarFrame(i) {
     r.geoLayer.setParams({ time: f.iso });
   } else {
     if (r.geoLayer && map.hasLayer(r.geoLayer)) map.removeLayer(r.geoLayer);
-    const url = `${r.host}${f.path}/256/{z}/{x}/{y}/4/1_1.png`; // scheme 4 = light rain green
+    const url = `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-${f.ts}/{z}/{x}/{y}.png`;
     if (r.layer) { r.layer.setUrl(url); if (!map.hasLayer(r.layer)) r.layer.addTo(map); }
-    else r.layer = L.tileLayer(url, { opacity: 0.8, zIndex: 5 }).addTo(map);
+    else r.layer = L.tileLayer(url, { opacity: 0.85, zIndex: 5 }).addTo(map);
   }
 
   const d = new Date(f.time * 1000);
@@ -617,13 +633,9 @@ function renderSnow() {
     </div>`).join('');
   if (!state.maps.snow) {
     const map = L.map('snowMap', { zoomControl: false, attributionControl: false }).setView([state.lat, state.lon], 6);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
-    // Open-Meteo snow depth overlay via NWS/RainViewer snow isn't tiled; show marker + radar snow frame
-    if (state.radar.host) {
-      const radarFrames = state.radar.frames.filter((f) => f.type === 'radar');
-      const f = radarFrames[radarFrames.length - 1];
-      if (f) L.tileLayer(`${state.radar.host}${f.path}/256/{z}/{x}/{y}/4/1_1.png`, { opacity: 0.6 }).addTo(map);
-    }
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 12 }).addTo(map);
+    // current NWS NEXRAD reflectivity overlay
+    L.tileLayer('https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png', { opacity: 0.6 }).addTo(map);
     L.marker([state.lat, state.lon]).addTo(map);
     state.maps.snow = map;
   }
