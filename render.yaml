@@ -1,0 +1,26 @@
+# Render Blueprint for Weather Watcher.
+# In Render: New + > Blueprint > connect this GitHub repo. Render reads this
+# file and provisions the service automatically.
+services:
+  - type: web
+    name: weather-watcher
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Weather provider keys (the ones supplied for this project).
+      - key: WEATHERAPI_KEY
+        value: 6c167a50ff574618987180912261306
+      - key: PIRATE_WEATHER_KEY
+        value: r7yOLHkOseKaqzJUOVHKSlSt0UlEPNSN
+      # Model used for the AI summaries.
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-4-5-20251001
+      # Optional: add your Anthropic key in the Render dashboard to turn on the
+      # AI summaries (home pattern, daily, drought). Left unset by default;
+      # the app works without it.
+      - key: ANTHROPIC_API_KEY
+        sync: false

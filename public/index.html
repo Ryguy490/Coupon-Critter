@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Weather Watcher</title>
+  <meta name="theme-color" content="#0a1a3f" />
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- siren used for emergency alerts -->
+  <audio id="siren" src="assets/siren.mp3" preload="auto" loop></audio>
+
+  <!-- ============================== HEADER ============================== -->
+  <header class="app-header glass">
+    <button id="menuBtn" class="icon-btn" title="Menu" aria-label="Menu">&#9776;</button>
+    <button id="refreshBtn" class="icon-btn" title="Refresh data" aria-label="Refresh">&#10227;</button>
+    <div class="brand">
+      <img src="assets/logo.svg" alt="" class="brand-logo" />
+      <div class="brand-text">
+        <h1>Weather Watcher</h1>
+        <div class="loc-row">
+          <div id="locLabel" class="loc-label">Locating…</div>
+          <button id="favBtn" class="fav-btn" title="Save as favorite" aria-label="Favorite this place">&#9825;</button>
+        </div>
+      </div>
+    </div>
+    <div class="search-wrap">
+      <input id="searchInput" type="text" placeholder="Search any town…" autocomplete="off" />
+      <div id="searchResults" class="search-results hidden"></div>
+    </div>
+    <button id="infoBtn" class="icon-btn" title="About / data sources" aria-label="Info">&#9432;</button>
+  </header>
+
+  <!-- emergency alert banner + siren control -->
+  <div id="alertBanner" class="alert-banner hidden">
+    <span class="ab-icon">&#9888;</span>
+    <span id="alertBannerText" class="ab-text"></span>
+    <button id="silenceBtn" class="ab-silence">Silence siren</button>
+  </div>
+
+  <!-- pull-to-refresh hint -->
+  <div id="ptr" class="ptr"><span>&#10227; Release to refresh</span></div>
+
+  <!-- ============================== MAIN ============================== -->
+  <main id="main">
+
+    <!-- ----- HOME ----- -->
+    <section class="view" data-view="home">
+      <div class="subtabs" data-group="home">
+        <button class="subtab active" data-sub="now">Home</button>
+        <button class="subtab" data-sub="hourly">Hourly</button>
+        <button class="subtab" data-sub="daily">Daily</button>
+      </div>
+
+      <div class="subview" data-sub="now">
+        <div class="current-hero glass">
+          <div class="hero-main">
+            <img id="curIcon" class="cur-icon" alt="" />
+            <div class="hero-temp"><span id="curTemp">--</span><span class="deg">°</span></div>
+            <div class="hero-meta">
+              <div id="curCond" class="cur-cond">—</div>
+              <div id="curHumidity" class="cur-sub">Humidity --%</div>
+            </div>
+          </div>
+          <div id="curUpcoming" class="hero-upcoming">Upcoming wind &amp; precipitation…</div>
+        </div>
+
+        <div class="card glass" id="patternCard">
+          <h3 class="card-title" id="patternTitle">Weather Pattern</h3>
+          <p id="patternText" class="pattern-text">Loading the latest National Weather Service statement…</p>
+          <div id="patternSource" class="pattern-source"></div>
+        </div>
+
+        <div class="card glass">
+          <div class="card-head">
+            <h3 class="card-title">Precipitation in the last</h3>
+            <select id="precipWindow" class="select">
+              <option value="1">1 hour</option>
+              <option value="3">3 hours</option>
+              <option value="6">6 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24" selected>24 hours</option>
+              <option value="48">48 hours</option>
+            </select>
+          </div>
+          <div id="precipReadout" class="precip-readout">—</div>
+        </div>
+
+        <div class="card glass">
+          <h3 class="card-title">Intensity Guide</h3>
+          <div id="intensityGuide" class="intensity-guide"></div>
+          <div class="intensity-legend">
+            <span><i class="sw light"></i>Light</span>
+            <span><i class="sw mod"></i>Moderate</span>
+            <span><i class="sw heavy"></i>Heavy</span>
+          </div>
+          <div id="intensityStatus" class="intensity-status muted"></div>
+        </div>
+      </div>
+
+      <div class="subview hidden" data-sub="hourly">
+        <div class="note">Next 48 hours.</div>
+        <div id="hourlyTable" class="hourly-table"></div>
+      </div>
+
+      <div class="subview hidden" data-sub="daily">
+        <div id="dailyCurrent" class="daily-current glass"></div>
+        <div id="dailyStrip" class="daily-strip"></div>
+        <div id="dailyDetail" class="card glass daily-detail">
+          <h3 id="dailyDetailTitle" class="card-title">Select a day</h3>
+          <p id="dailyDetailSummary" class="pattern-text">—</p>
+          <div id="dailyDetailStats" class="day-stats"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----- RADAR ----- -->
+    <section class="view hidden" data-view="radar">
+      <div class="subtabs" data-group="radar">
+        <button class="subtab active" data-sub="map">Map</button>
+        <button class="subtab" data-sub="graph">Graph</button>
+      </div>
+
+      <div class="subview" data-sub="map">
+        <div id="radarMap" class="map"></div>
+        <div class="radar-controls glass">
+          <div class="timeline-row">
+            <button id="radarPlay" class="icon-btn">&#9654;</button>
+            <input id="radarSlider" type="range" min="0" max="0" value="0" />
+            <span id="radarTime" class="radar-time">—</span>
+          </div>
+          <div class="layers-row">
+            <label><input type="checkbox" id="lyrWarnings" checked /> Warnings</label>
+            <label><input type="checkbox" id="lyrStorms" /> Hurricane tracks</label>
+            <label><input type="checkbox" id="lyrPin" /> Drop pin</label>
+          </div>
+        </div>
+        <div class="radar-legend glass" id="radarLegend"></div>
+      </div>
+
+      <div class="subview hidden" data-sub="graph">
+        <div class="card glass">
+          <div class="card-head">
+            <h3 class="card-title">Precipitation graph</h3>
+            <select id="graphRange" class="select">
+              <option value="12">Next 12h</option>
+              <option value="24" selected>Next 24h</option>
+              <option value="48">Next 48h</option>
+            </select>
+          </div>
+          <canvas id="precipChart" height="200"></canvas>
+        </div>
+        <div class="precip-breakdown">
+          <div class="pb-card glass" data-type="snow"><h4>Snow</h4><div class="pb-rows"></div></div>
+          <div class="pb-card glass" data-type="rain"><h4>Rain</h4><div class="pb-rows"></div></div>
+          <div class="pb-card glass pb-mix" data-type="mix"><h4>Wintry mix</h4><div class="pb-rows"></div></div>
+          <div class="pb-card glass pb-ice" data-type="ice"><h4>Ice</h4><div class="pb-rows"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----- SNOW ----- -->
+    <section class="view hidden" data-view="snow">
+      <div class="card glass">
+        <h3 class="card-title">7-Day Snowfall Forecast</h3>
+        <div id="snowSummary" class="snow-summary">—</div>
+        <div id="snowStrip" class="daily-strip"></div>
+      </div>
+      <div id="snowMap" class="map"></div>
+      <div class="note">Snow depth overlay. Sources: NWS, Open-Meteo, Weather Channel.</div>
+    </section>
+
+    <!-- ----- HURRICANES ----- -->
+    <section class="view hidden" data-view="hurricanes">
+      <div id="stormList" class="storm-list"></div>
+      <div class="subtabs" data-group="hurricanes">
+        <button class="subtab active" data-basin="atlc">Atlantic</button>
+        <button class="subtab" data-basin="epac">E. Pacific</button>
+        <button class="subtab" data-basin="cpac">C. Pacific</button>
+      </div>
+      <iframe id="nhcFrame" class="nhc-frame" title="NOAA National Hurricane Center interactive map"
+              src="https://www.nhc.noaa.gov/?atlc" loading="lazy"></iframe>
+      <div class="note">The three official NOAA / National Hurricane Center interactive tropical maps (Atlantic, Eastern&nbsp;Pacific, Central&nbsp;Pacific). <a id="nhcOpen" href="https://www.nhc.noaa.gov/?atlc" target="_blank" rel="noopener">Open at nhc.noaa.gov &rarr;</a></div>
+    </section>
+
+    <!-- ----- SEVERE WEATHER ----- -->
+    <section class="view hidden" data-view="severe">
+      <div class="card glass">
+        <div class="card-head">
+          <h3 class="card-title">Active Watches &amp; Warnings</h3>
+          <select id="alertFilter" class="select"><option value="all">All events</option></select>
+        </div>
+        <div id="alertList" class="alert-list"></div>
+      </div>
+    </section>
+
+    <!-- ----- DROUGHT ----- -->
+    <section class="view hidden" data-view="drought">
+      <div class="drought-bg">
+        <div class="card glass">
+          <h3 class="card-title">Drought Conditions</h3>
+          <div id="droughtLevel" class="drought-level">—</div>
+          <div id="droughtMeter" class="drought-meter"><div id="droughtMeterFill"></div></div>
+          <p id="droughtSummary" class="pattern-text">Assessing local drought conditions…</p>
+        </div>
+        <div class="card glass">
+          <h3 class="card-title">Past Precipitation</h3>
+          <div id="droughtPrecip" class="drought-precip">—</div>
+        </div>
+        <div id="droughtMap" class="map"></div>
+        <div class="note">Drought level shaded yellow &rarr; red. Sources: U.S. Drought Monitor, NWS, Open-Meteo, AI.</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================== BOTTOM NAV ============================== -->
+  <nav class="bottom-nav glass">
+    <button class="navbtn active no-icon" data-nav="home"><span class="nl">Home</span></button>
+    <button class="navbtn no-icon" data-nav="radar"><span class="nl">Radar</span></button>
+    <button class="navbtn" data-nav="snow"><span class="ni"><img src="assets/snow.svg" class="nav-svg" alt="" /></span><span class="nl">Snow</span></button>
+    <button class="navbtn" data-nav="hurricanes"><span class="ni"><img src="assets/hurricane.png" class="nav-svg" alt="" /></span><span class="nl">Hurricanes</span></button>
+    <button class="navbtn" data-nav="severe"><span class="ni"><img src="assets/tornado.png" class="nav-svg" alt="" /></span><span class="nl">Severe Weather</span></button>
+    <button class="navbtn" data-nav="drought"><span class="ni"><img src="assets/drought.svg" class="nav-svg" alt="" /></span><span class="nl">Drought</span></button>
+  </nav>
+
+  <!-- ============================== SIDE MENU ============================== -->
+  <div id="overlay" class="overlay hidden"></div>
+  <aside id="sideMenu" class="side-menu glass hidden">
+    <h2>Weather Watcher</h2>
+    <p class="menu-loc" id="menuLoc"></p>
+    <button class="menu-item" data-act="locate"><img src="assets/locate.svg" class="menu-svg" alt="" /> Use my location</button>
+    <button class="menu-item" data-act="refresh">&#10227; Refresh all data</button>
+    <hr />
+    <h3>Settings</h3>
+    <label class="menu-toggle"><input type="checkbox" id="sirenEnabled" checked /> Emergency siren</label>
+    <hr />
+    <button class="menu-item" data-act="about">&#9432; About &amp; data sources</button>
+  </aside>
+
+  <!-- ============================== ABOUT MODAL ============================== -->
+  <div id="aboutModal" class="modal hidden">
+    <div class="modal-card glass">
+      <button id="aboutClose" class="modal-close">&times;</button>
+      <img src="assets/logo.svg" class="about-logo" alt="" />
+      <h2>Weather Watcher</h2>
+      <p>A clean, Weather Channel-style forecast app.</p>
+      <h3>Where the data comes from</h3>
+      <ul class="about-list">
+        <li><b>Radar &amp; current conditions:</b> NWS, RainViewer, Open-Meteo</li>
+        <li><b>Forecasts &amp; precipitation:</b> NWS, Open-Meteo, WeatherAPI.com, Pirate Weather</li>
+        <li><b>Snow:</b> NWS, Open-Meteo, Weather Channel</li>
+        <li><b>Severe weather warnings:</b> NWS, Weather Channel</li>
+        <li><b>Hurricanes / tropical:</b> NOAA National Hurricane Center</li>
+        <li><b>Drought:</b> U.S. Drought Monitor, NWS, Open-Meteo, AI</li>
+      </ul>
+      <p class="about-ai" id="aboutAi"></p>
+      <p class="about-fine">The values in the original mock-ups were placeholders; everything here is live data.</p>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
